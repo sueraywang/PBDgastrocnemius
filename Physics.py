@@ -4,16 +4,16 @@ import numpy as np
 
 # Physical constants
 DENSITY = 1000.0
-GRAVITY = np.array([0.0, 0.0, -90.8])
-DT = 1/60
+GRAVITY = np.array([0.0, 0.0, -9.8])
+DT = 1/30
 
 # XPBD constants
-SUB_STEPS = 1
+SUB_STEPS = 5
 DEVIATORIC_COMPLIANCE = 1.0/100000.0
 VOLUME_COMPLIANCE = 0.0
 
 class Mesh:
-    def __init__(self, vertices, tets, edges, density=DENSITY, devCompliance = DEVIATORIC_COMPLIANCE, volCompliance = VOLUME_COMPLIANCE):
+    def __init__(self, vertices, tets, density=DENSITY, devCompliance = DEVIATORIC_COMPLIANCE, volCompliance = VOLUME_COMPLIANCE):
         # Vertices
         self.numVertices = len(vertices)
         self.positions = vertices #(#vers, 3) array
@@ -26,8 +26,6 @@ class Mesh:
         self.invRestVolume = np.zeros(self.numTets) # (#tets, 1) array
         self.invRestPoses = np.zeros((self.numTets, 3, 3)) # (#tets, column major (3, 3) matrix) array
         self.invMasses = np.zeros(self.numVertices) # (#vers, 1) array
-        # Edges
-        self.edgeIds = edges #(#edges, 2) array
         # Constants
         self.devCompliance = devCompliance # float
         self.volCompliance = volCompliance # float
@@ -62,24 +60,6 @@ class Mesh:
         np.add.at(self.invMasses, self.tetIds.flatten(), np.repeat(vMass, 4))
         # Convert masses to inverse masses
         self.invMasses = np.where(self.invMasses > 0, 1.0 / self.invMasses, 0.0)
-
-        """
-        for tetNr in range(self.numTets):
-            vIds = self.tetIds[tetNr]
-            edge1 = self.positions[vIds[1]] - self.positions[vIds[0]]
-            edge2 = self.positions[vIds[2]] - self.positions[vIds[0]]
-            edge3 = self.positions[vIds[3]] - self.positions[vIds[0]]
-            volume = np.dot(np.cross(edge1, edge2), edge3) / 6.0
-            self.invRestVolume[tetNr] = 1.0 / volume
-            # Initialize invRestPoses (column major)
-            self.invRestPoses[tetNr] = np.linalg.inv(np.transpose(np.array([edge1, edge2, edge3])))
-            # Initialize masses
-            for i in range(4):
-                self.invMasses[vIds[i]] += volume * self.density / 4.0 if volume > 0 else 0.0
-        for mass in self.invMasses:
-            # convert masses to invMasses
-            mass = 1.0 / mass
-        """
         
     def step(self):
         for _ in range(SUB_STEPS):
@@ -91,7 +71,7 @@ class Mesh:
           
     def preSolve(self, dt, acc):
         for idx in range(len(self.positions)):
-            if (self.positions[idx][2] == 2.0):
+            if abs(self.positions[idx][2] - 1.0) < 1e-6:
                 continue
             self.prev_positions[idx] = self.positions[idx].copy()
             self.velocities[idx] += acc * dt
@@ -102,9 +82,9 @@ class Mesh:
         self.solveDevConstraint(self.devCompliance, dt)
         # Update velocity
         for idx in range(len(self.positions)):
-            if (self.positions[idx][2] == 2.0):
+            if abs(self.positions[idx][2] - 1.0) < 1e-6:
                 continue
-            self.velocities[idx] = (self.prev_positions[idx] - self.positions[idx]) / dt
+            self.velocities[idx] = (self.positions[idx] - self.prev_positions[idx]) / dt
 
     def solveDevConstraint(self, compliance, dt):
         for tetNr in range(self.numTets):
@@ -168,6 +148,6 @@ class Mesh:
         
         for i in range(4):
             id = self.tetIds[tetNr][i]
-            if (self.positions[id][2] == 2.0):
+            if abs(self.positions[id][2] - 1.0) < 1e-6:
                 continue
             self.positions[id] += self.invMasses[id] * dlambda * self.grads[i]

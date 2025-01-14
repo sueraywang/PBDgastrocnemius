@@ -70,19 +70,20 @@ class Renderer:
         self.wireframe_mode = True
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
 
-        # Camera parameters
-        self.camera_pos = np.array([0.0, -5.0, 1.0], dtype=np.float32)
-        self.camera_front = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        # Orbital camera parameters
+        self.target = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.camera_distance = 5.0  # Distance from target
+        self.theta = np.pi / 2  # Horizontal angle (azimuth), starts on Y axis
+        self.phi = np.pi / 2    # Vertical angle (polar), starts in XY plane
         self.camera_up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        self.yaw = 90.0  # Initialize yaw to -90 degrees
-        self.pitch = 0.0
+        self.convert_to_cartesian()
+
+        # Mouse control parameters
         self.last_x = width / 2
         self.last_y = height / 2
         self.first_mouse = True
         self.fov = 45.0
-
-        # Mouse control parameters
-        self.mouse_sensitivity = 0.1
+        self.mouse_sensitivity = 0.005
         self.pan_sensitivity = 0.01
         self.right_mouse_pressed = False
         self.middle_mouse_pressed = False
@@ -96,6 +97,13 @@ class Renderer:
 
         # Load mesh data
         self.setup_mesh(vertices, faces)
+
+    def convert_to_cartesian(self):
+        x = self.camera_distance * np.sin(self.phi) * np.cos(self.theta)
+        y = self.camera_distance * np.sin(self.phi) * np.sin(self.theta)
+        z = self.camera_distance * np.cos(self.phi)
+        self.camera_pos = self.target + np.array([x, y, z], dtype=np.float32)
+        self.camera_front = (self.target - self.camera_pos) / np.linalg.norm(self.target - self.camera_pos)
 
     def mouse_button_callback(self, window, button, action, mods):
         if button == glfw.MOUSE_BUTTON_RIGHT:
@@ -121,26 +129,15 @@ class Renderer:
         self.last_x = xpos
         self.last_y = ypos
 
-        if self.right_mouse_pressed:  # Rotation
-            xoffset *= self.mouse_sensitivity
-            yoffset *= self.mouse_sensitivity
-
-            self.yaw += xoffset
-            self.pitch += yoffset
-
-            # Constrain pitch
-            if self.pitch > 89.0:
-                self.pitch = 89.0
-            if self.pitch < -89.0:
-                self.pitch = -89.0
-
-            # Update camera direction
-            direction = np.array([
-                np.cos(np.radians(self.yaw)) * np.cos(np.radians(self.pitch)),
-                np.sin(np.radians(self.yaw)) * np.cos(np.radians(self.pitch)),
-                np.sin(np.radians(self.pitch))
-            ])
-            self.camera_front = direction / np.linalg.norm(direction)
+        if self.right_mouse_pressed:
+            self.theta -= xoffset * self.mouse_sensitivity
+            self.phi -= yoffset * self.mouse_sensitivity
+            
+            # Clamp phi to avoid gimbal lock
+            self.phi = np.clip(self.phi, 0.1, np.pi - 0.1)
+            
+            # Update camera position based on new angles
+            self.convert_to_cartesian()
             
         elif self.middle_mouse_pressed:  # Pan
             # Calculate right and up vectors in world space
@@ -148,21 +145,21 @@ class Renderer:
             right = right / np.linalg.norm(right)
             up = self.camera_up/np.linalg.norm(self.camera_up)
             
-            # Move camera position without changing orientation
+            # Update target position (panning)
             pan_x = -xoffset * self.pan_sensitivity
             pan_y = -yoffset * self.pan_sensitivity
             
-            self.camera_pos += right * pan_x + up * pan_y
+            self.target += right * pan_x + up * pan_y
+            self.convert_to_cartesian()
+
+    def scroll_callback(self, window, xoffset, yoffset):
+        # Update camera distance (zoom)
+        self.camera_distance -= yoffset * 0.5
+        self.camera_distance = max(2.0, min(50.0, self.camera_distance))
+        self.convert_to_cartesian()
 
     def framebuffer_size_callback(self, window, width, height):
         glViewport(0, 0, width, height)
-
-    def scroll_callback(self, window, xoffset, yoffset):
-        self.fov -= yoffset
-        if self.fov < 1.0:
-            self.fov = 1.0
-        if self.fov > 45.0:
-            self.fov = 45.0
 
     def compile_shader_program(self):
         vert_shader = shaders.compileShader(vertex_shader, GL_VERTEX_SHADER)
