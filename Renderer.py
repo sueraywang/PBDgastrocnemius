@@ -123,7 +123,7 @@ class Renderer:
             return
 
         xoffset = xpos - self.last_x
-        yoffset = self.last_y - ypos  # Reversed since y-coordinates go from bottom to top
+        yoffset = ypos - self.last_y
 
         # Store current position for next frame
         self.last_x = xpos
@@ -147,7 +147,7 @@ class Renderer:
             
             # Update target position (panning)
             pan_x = -xoffset * self.pan_sensitivity
-            pan_y = -yoffset * self.pan_sensitivity
+            pan_y = +yoffset * self.pan_sensitivity
             
             self.target += right * pan_x + up * pan_y
             self.convert_to_cartesian()
