@@ -3,9 +3,9 @@
 import numpy as np
 
 # Physical constants
-DENSITY = 1000.0
-GRAVITY = np.array([0.0, 0.0, -9.8])
-DT = 1/30
+DENSITY = 1000.0 #kg/m**3
+GRAVITY = np.array([0.0, 0.0, -9.8]) #m/s**2
+DT = 0.01 #second
 
 # XPBD constants
 SUB_STEPS = 5
@@ -19,6 +19,7 @@ class Mesh:
         self.positions = vertices #(#vers, 3) array
         self.prev_positions = self.positions.copy()
         self.velocities = np.zeros_like(vertices) #(#vers, 3) array
+        self.fixed_vertices = set()
         # Tetrahedrons
         self.numTets = len(tets)
         self.tetIds = tets #(#tets, 4) array
@@ -58,8 +59,12 @@ class Mesh:
         # Add mass from all tetrahedra
         vMass = np.maximum(volumes, 0) * self.density / 4.0  # Compute per-tetrahedron mass
         np.add.at(self.invMasses, self.tetIds.flatten(), np.repeat(vMass, 4))
-        # Convert masses to inverse masses
-        self.invMasses = np.where(self.invMasses > 0, 1.0 / self.invMasses, 0.0)
+        # Convert masses to inverse masses, change fixed vertices mass to 0
+        self.invMasses = np.where(
+            (self.invMasses > 0) & (~np.isin(np.arange(self.numVertices), list(self.fixed_vertices))),
+            1.0 / self.invMasses,
+            0.0
+        )
         
     def step(self):
         for _ in range(SUB_STEPS):
@@ -70,21 +75,17 @@ class Mesh:
         self.solve(DT/SUB_STEPS)
           
     def preSolve(self, dt, acc):
-        for idx in range(len(self.positions)):
-            if abs(self.positions[idx][2] - 1.0) < 1e-6:
-                continue
-            self.prev_positions[idx] = self.positions[idx].copy()
-            self.velocities[idx] += acc * dt
-            self.positions[idx] += self.velocities[idx] * dt
+        self.prev_positions = self.positions.copy()
+        # Only update velocities and positions for non-fixed vertices
+        mask = ~np.isin(np.arange(self.numVertices), list(self.fixed_vertices))
+        self.velocities[mask] += acc * dt
+        self.positions[mask] += self.velocities[mask] * dt
 
     def solve(self, dt):
         self.solveHydroConstraint(self.volCompliance, dt)
         self.solveDevConstraint(self.devCompliance, dt)
         # Update velocity
-        for idx in range(len(self.positions)):
-            if abs(self.positions[idx][2] - 1.0) < 1e-6:
-                continue
-            self.velocities[idx] = (self.positions[idx] - self.prev_positions[idx]) / dt
+        self.velocities = (self.positions - self.prev_positions) / dt
 
     def solveDevConstraint(self, compliance, dt):
         for tetNr in range(self.numTets):
@@ -148,6 +149,4 @@ class Mesh:
         
         for i in range(4):
             id = self.tetIds[tetNr][i]
-            if abs(self.positions[id][2] - 1.0) < 1e-6:
-                continue
             self.positions[id] += self.invMasses[id] * dlambda * self.grads[i]
