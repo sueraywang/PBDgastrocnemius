@@ -1,7 +1,6 @@
 # Physics.py
 import numpy as np
-import pybullet as p
-import pybullet_data
+from test import *
 
 # Physical constants
 DENSITY = 1000.0  # kg/m**3
@@ -12,6 +11,7 @@ DT = 0.01  # second
 SUB_STEPS = 5
 DEVIATORIC_COMPLIANCE = 1.0/100000.0
 VOLUME_COMPLIANCE = 0.0
+COLLISION_COMPLIANCE = 1e-3  # Stiffness for collision response
 
 class MeshState:
     """Class to store the state and parameters of a single mesh"""
@@ -40,9 +40,24 @@ class MeshState:
         self.dF = np.zeros((3, 3))
         self.grads = np.zeros((4, 3))
 
+class CollisionConstraint:
+    def __init__(self, vertex_idx, vertex_mesh_idx, trig_idx, triangle_mesh_idx):
+        self.vertex_idx = vertex_idx
+        self.vertex_mesh_idx = vertex_mesh_idx
+        self.trig_idx = trig_idx
+        self.triangle_mesh_idx = triangle_mesh_idx
+
 class Simulator:
-    def __del__(self):
-        p.disconnect(physicsClientId=self.physicsClientId)
+    def __init__(self, devCompliance=DEVIATORIC_COMPLIANCE, volCompliance=VOLUME_COMPLIANCE):
+        self.meshes = [] # It stores MeshState objs, not the Mesh obj
+        self.devCompliance = devCompliance
+        self.volCompliance = volCompliance
+        self.collision_constraints = []  # Store active collision constraints
+
+    def add_mesh(self, mesh, density=DENSITY):
+        mesh_state = MeshState(mesh, density)
+        self.meshes.append(mesh_state)
+        self.init_mesh_physics(mesh_state)
     
     def init_mesh_physics(self, mesh_state):
         # Gather positions of the four vertices for all tetrahedra
@@ -74,38 +89,27 @@ class Simulator:
 
     def step(self):
         dt = DT / SUB_STEPS
-        for mesh_state in self.meshes:
-            mesh_state.prev_positions = mesh_state.positions.copy()
-        
         for _ in range(SUB_STEPS):
-            # Update velocities and positions for all meshes
             for mesh_state in self.meshes:
+                mesh_state.prev_positions = mesh_state.positions.copy()
                 mask = ~np.isin(np.arange(mesh_state.numVertices), list(mesh_state.fixed_vertices))
                 mesh_state.velocities[mask] += GRAVITY * dt
                 mesh_state.positions[mask] += mesh_state.velocities[mask] * dt
+                self.detect_collisions(mesh_state)
             
-            # Solve all constraints for all meshes
+             # Solve internal constraints
             self.solve_all_constraints(dt)
-            
-            # Update velocities for all meshes
+        
+            # Final velocity update
             for mesh_state in self.meshes:
                 mesh_state.velocities = (mesh_state.positions - mesh_state.prev_positions) / dt
-                mesh_state.prev_positions = mesh_state.positions.copy()
 
     def solve_all_constraints(self, dt):
-        # Solve hydrostatic constraints for all meshes
         for mesh_state in self.meshes:
             for tetNr in range(mesh_state.numTets):
                 self.solve_hydro_constraint(mesh_state, tetNr, dt)
-        
-        # Solve deviatoric constraints for all meshes
-        for mesh_state in self.meshes:
-            for tetNr in range(mesh_state.numTets):
                 self.solve_dev_constraint(mesh_state, tetNr, dt)
-        
-        # Handle collisions for all meshes
-        for mesh_state in self.meshes:
-            self.solve_collisions(mesh_state)
+        self.solve_collision_constraints(dt)
 
     def solve_dev_constraint(self, mesh_state, tetNr, dt):
         vIds = mesh_state.tetIds[tetNr]
@@ -169,150 +173,155 @@ class Simulator:
         for i in range(4):
             id = mesh_state.tetIds[tetNr][i]
             mesh_state.positions[id] += mesh_state.invMasses[id] * dlambda * mesh_state.grads[i]
+    
+    def detect_collisions(self, mesh_state):
+        ground_level = 0.0
+        for i in range(mesh_state.numVertices):
+            if mesh_state.positions[i, 2] < ground_level:
+                mesh_state.positions[i, 2] = ground_level 
 
-    def add_mesh(self, mesh, density=DENSITY):
-        mesh_state = MeshState(mesh, density)
-        self.meshes.append(mesh_state)
-        self.init_mesh_physics(mesh_state)
-        
-        try:
-            # Convert to convex hull for simpler collision detection
-            vertices = mesh_state.positions.astype(np.float32)
-            
-            # Create a convex hull collision shape
-            collision_shape = p.createCollisionShape(
-                shapeType=p.GEOM_MESH,
-                vertices=vertices.tolist(),
-                physicsClientId=self.physicsClientId,
-                flags=p.GEOM_FORCE_CONCAVE_TRIMESH
-            )
-            
-            # Create multibody
-            mesh_state.bullet_body = p.createMultiBody(
-                baseMass=1.0,  # Non-zero mass for dynamic body
-                baseCollisionShapeIndex=collision_shape,
-                basePosition=[0, 0, -1],  # Start slightly above ground
-                baseOrientation=[0, 0, 0, 1],
-                physicsClientId=self.physicsClientId
-            )
-            
-            # Set physical properties
-            p.changeDynamics(
-                mesh_state.bullet_body,
-                -1,  # -1 for base link
-                restitution=0.3,
-                lateralFriction=0.5,
-                physicsClientId=self.physicsClientId
-            )
-            
-        except Exception as e:
-            print(f"Error in mesh creation: {str(e)}")
-            raise
-        
-        return mesh_state
+        current_mesh_idx = self.meshes.index(mesh_state)
+        self.collision_constraints = []
 
-    def solve_collisions(self, mesh_state):
-        """Handle collisions using PyBullet with debug output"""
-        try:
-            # Print current mesh state
-            min_z = np.min(mesh_state.positions[:, 2])
-            max_z = np.max(mesh_state.positions[:, 2])
-            print(f"Mesh Z range: min={min_z:.3f}, max={max_z:.3f}")
-
-            # Remove old collision object
-            if hasattr(mesh_state, 'bullet_body'):
-                p.removeBody(mesh_state.bullet_body, physicsClientId=self.physicsClientId)
-            
-            # Create new collision shape with updated vertices
-            vertices = mesh_state.positions.astype(np.float32)
-            collision_shape = p.createCollisionShape(
-                shapeType=p.GEOM_MESH,
-                vertices=vertices.tolist(),
-                physicsClientId=self.physicsClientId,
-                flags=p.GEOM_FORCE_CONCAVE_TRIMESH
-            )
-            
-            # Create new multibody with updated collision shape
-            mesh_state.bullet_body = p.createMultiBody(
-                baseMass=1.0,
-                baseCollisionShapeIndex=collision_shape,
-                basePosition=[0, 0, 0],  # Changed to match actual mesh position
-                baseOrientation=[0, 0, 0, 1],
-                physicsClientId=self.physicsClientId
-            )
-            
-            # Step simulation to detect collisions
-            p.stepSimulation(physicsClientId=self.physicsClientId)
-            
-            # Get contact points
-            contacts = p.getContactPoints(
-                bodyA=self.planeId,
-                bodyB=mesh_state.bullet_body,
-                physicsClientId=self.physicsClientId
-            )
-            
-            print(f"Number of contacts detected: {len(contacts)}")
-            
-            for i, contact in enumerate(contacts):
-                point_on_b = contact[6]  # Contact point on our mesh
-                normal = contact[7]      # Normal from A to B
-                depth = contact[8]       # Penetration depth
-                print(f"Contact {i}: point={point_on_b}, normal={normal}, depth={depth}")
+        """
+        spatial_hash = SpatialHash(cell_size=0.05)
+        # Do a broadphase collision detection
+        for other_idx, other_mesh_state in enumerate(self.meshes):
+            if other_idx == current_mesh_idx:
+                continue
+            collisions = spatial_hash.find_vertex_triangle_collisions(
+                        mesh_state.positions,
+                        other_mesh_state.positions,
+                        other_mesh_state.mesh.faces,
+                        threshold=0.0
+                    )
+                    
+            for c in collisions:
+                vId = c[0]
+                trigId = c[1]
                 
-                if depth > 0:
-                    # Find closest vertex
-                    point = np.array(point_on_b)
-                    distances = np.linalg.norm(mesh_state.positions - point, axis=1)
-                    vertex_id = np.argmin(distances)
-                    
-                    print(f"Found vertex {vertex_id} at position {mesh_state.positions[vertex_id]}")
-                    
-                    if vertex_id not in mesh_state.fixed_vertices:
-                        # Project vertex out of collision
-                        correction = (depth + self.collision_margin) * np.array(normal)
-                        mesh_state.positions[vertex_id] += correction
+                # Check if vertex is "within" trig
+                normal = other_mesh_state.mesh.face_normals[trigId]
+                dot_product = np.dot(normal, mesh_state.positions[vId] - other_mesh_state.positions[trigId[0]])
+                if dot_product > 0.0:
+                    continue
                         
-                        # Update velocity for bounce
-                        velocity = mesh_state.velocities[vertex_id]
-                        normal_velocity = np.dot(velocity, normal)
-                        
-                        if normal_velocity < 0:
-                            reflection = -normal_velocity * (1 + self.restitution)
-                            mesh_state.velocities[vertex_id] += reflection * np.array(normal)
-                            print(f"Applied bounce: old_vel={velocity}, new_vel={mesh_state.velocities[vertex_id]}")
-            
-        except Exception as e:
-            print(f"Error in collision handling: {str(e)}")
-            return False
-        
-        return True
+                # Calculate intersection
+                t = np.dot(normal, mesh_state.positions[vId] - mesh_state.prev_positions[vId]) / dot_product
+                    
+                intersection = mesh_state.prev_positions[vId] + t * (mesh_state.positions[vId] - mesh_state.prev_positions[vId])
+                if self.point_in_triangle(intersection,
+                                        other_mesh_state.positions[trigId[0]],
+                                        other_mesh_state.positions[trigId[1]],
+                                        other_mesh_state.positions[trigId[2]]):
+                    self.collision_constraints.append(CollisionConstraint(vId, current_mesh_idx, trigId, other_idx))
 
-    def __init__(self, devCompliance=DEVIATORIC_COMPLIANCE, volCompliance=VOLUME_COMPLIANCE):
-        self.meshes = []
-        self.devCompliance = devCompliance
-        self.volCompliance = volCompliance
+        """
+        # Mesh-to-mesh collision detection
+        current_min = np.min(mesh_state.positions, axis=0)
+        current_max = np.max(mesh_state.positions, axis=0)
+        for other_idx, other_mesh_state in enumerate(self.meshes):
+            if other_idx == current_mesh_idx:
+                continue
+            
+            # AABB test (unchanged)
+            other_min = np.min(other_mesh_state.positions, axis=0)
+            other_max = np.max(other_mesh_state.positions, axis=0)
+            if (current_max[0] < other_min[0] or current_min[0] > other_max[0] or
+                current_max[1] < other_min[1] or current_min[1] > other_max[1] or
+                current_max[2] < other_min[2] or current_min[2] > other_max[2]):
+                continue
+            
+            # For each vertex in mesh1, check against each triangle in mesh2
+            for vertex_idx, vertex in enumerate(mesh_state.positions):
+                prev_pos = mesh_state.prev_positions[vertex_idx]
+                curr_pos = vertex
+                direction = curr_pos - prev_pos
+                direction_length = np.linalg.norm(direction)
+                
+                if direction_length < 1e-6:  # Skip if barely moving
+                    continue
+                    
+                # Normalize direction
+                direction_normalized = direction / direction_length
+                
+                for face_idx, face in enumerate(other_mesh_state.mesh.faces):
+                    normal = other_mesh_state.mesh.face_normals[face_idx]
+                    v0 = other_mesh_state.positions[face[0]]
+                    
+                    # Check if ray and plane are nearly parallel
+                    dot_product = np.dot(normal, direction_normalized)
+                    if abs(dot_product) < 1e-6:
+                        continue
+                        
+                    # Calculate intersection
+                    t = np.dot(normal, v0 - prev_pos) / dot_product
+                    
+                    # Scale t back to original range
+                    t = t * direction_length
+                    
+                    if 0.0 <= t <= 1.0:
+                        intersection = prev_pos + t * direction
+                        if self.point_in_triangle(intersection,
+                                                other_mesh_state.positions[face[0]],
+                                                other_mesh_state.positions[face[1]],
+                                                other_mesh_state.positions[face[2]]):
+                            self.collision_constraints.append(CollisionConstraint(vertex_idx, current_mesh_idx, face_idx, other_idx))
+
+    def point_in_triangle(self, p, a, b, c):
+        """Check if point p is inside triangle abc using barycentric coordinates"""
+        # Compute vectors
+        v0 = c - a
+        v1 = b - a
+        v2 = p - a
         
-        # Initialize PyBullet in DIRECT mode
-        self.physicsClientId = p.connect(p.DIRECT)
-        print("PyBullet initialized in DIRECT mode")
+        # Compute dot products
+        dot00 = np.dot(v0, v0)
+        dot01 = np.dot(v0, v1)
+        dot02 = np.dot(v0, v2)
+        dot11 = np.dot(v1, v1)
+        dot12 = np.dot(v1, v2)
         
-        p.setGravity(0, 0, -9.81, physicsClientId=self.physicsClientId)
-        print("Gravity set to [0, 0, -9.81]")
+        # Compute barycentric coordinates
+        denom = dot00 * dot11 - dot01 * dot01
+        if abs(denom) < 1e-10:  # Degenerate triangle
+            return False
+            
+        u = (dot11 * dot02 - dot01 * dot12) / denom
+        v = (dot00 * dot12 - dot01 * dot02) / denom
         
-        # Create ground plane at z=0
-        self.planeId = p.createCollisionShape(
-            p.GEOM_PLANE,
-            planeNormal=[0, 0, 1],
-            physicsClientId=self.physicsClientId
-        )
-        self.ground_body = p.createMultiBody(
-            baseMass=0,
-            baseCollisionShapeIndex=self.planeId,
-            basePosition=[0, 0, -1],
-            physicsClientId=self.physicsClientId
-        )
-        print(f"Ground plane created: shape_id={self.planeId}, body_id={self.ground_body}")
+        # Check if point is in triangle
+        return (u >= 0) and (v >= 0) and (u + v <= 1)
+    
+    def solve_collision_constraints(self, dt):
+        for constraint in self.collision_constraints:
+            self.solve_single_collision(constraint, dt)
+
+    def solve_single_collision(self, constraint, dt):
+        vertex_mesh = self.meshes[constraint.vertex_mesh_idx]
+        v = vertex_mesh.positions[constraint.vertex_idx]
+        trig_mesh = self.meshes[constraint.triangle_mesh_idx]
+        trig = trig_mesh.mesh.faces[constraint.trig_idx]
+        normal = trig_mesh.mesh.face_normals[constraint.trig_idx]
+        C = np.dot((v - trig_mesh.positions[trig[0]]), normal)
+
+        if C >= 0:
+            return
         
-        # Collision parameters
-        self.collision_margin = 0.01
-        self.restitution = 0.3
+        # Calculate weights
+        w_vertex = vertex_mesh.invMasses[constraint.vertex_idx]
+        w_triangle = sum(trig_mesh.invMasses[trig[i]] for i in range(3))
+        
+        total_weight = w_vertex + w_triangle
+        if total_weight < 1e-6:
+            return
+            
+        alpha = COLLISION_COMPLIANCE / dt / dt
+        dlambda = C / (total_weight + alpha)
+        
+        # Apply to vertex
+        vertex_mesh.positions[constraint.vertex_idx] += w_vertex * dlambda * normal
+        
+        # Apply to triangle vertices - NO additional division by 3 needed!
+        for i in range(3):
+            trig_mesh.positions[trig[i]] -= w_triangle/3.0 * dlambda * normal

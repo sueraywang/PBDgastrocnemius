@@ -1,55 +1,78 @@
 import time
-import glfw
 from Renderer import *
-from Physics import *
+from Physics_copy import *
 from FileReader import *
 import pyvista as pv
 import tetgen
 
-def main():
+def main():    
+    # Initialize renderer and simulator
+    renderer = Renderer()
+    simulator = Simulator()
+
+    #"""
+    # Position bottom cylinder on ground, top cylinder above it
+    left = np.array([-0.3, 0.0, 1.0])  # Lift slightly to account for radius
+    right = np.array([0.3, 0.0, 1.0])     # Start higher to fall onto bottom cylinder
     # Generate Mesh (real muscle statistics: r = 0.04, h = 0.1 (in meters))
-    cylinder = pv.Cylinder(radius=0.5, height=0.5, center=(0, 0, 0), direction=(0, 0, 1), resolution=16).triangulate()
+    cylinder = pv.Cylinder(radius=0.25, height=1.0, center=(0, 0, 0), direction=(1, 0, 0.5), resolution=16).triangulate()
     tet = tetgen.TetGen(cylinder)
     vertices, tets = tet.tetrahedralize()
     surface_faces = generate_surface_faces(tets)
     
-    # Initialize renderer and simulator
-    renderer = Renderer()
-    centers = [np.array([-1.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0])]
-    meshes = [Mesh(vertices + centers[0], surface_faces, tets), Mesh(vertices + centers[1], surface_faces, tets)]
-    simulator = Simulator()
-    for i in range(len(meshes)):
-        renderer.add_mesh(meshes[i])
-        simulator.add_mesh(meshes[i])
-        
-    # Manipulate the mesh
-    #for i in range(len(meshes)):
-        #fix_surfaces(simulator, i, 1.0, tolerance=1e-5)
-        #fix_surfaces(simulator, i, -1.0, tolerance=1e-5)
+    """
 
-    while not renderer.should_close():
-        glfw.poll_events()
+    # Position bottom cylinder on ground, top cylinder above it
+    top = np.array([0.3, 0.3, 0.8])  # Lift slightly to account for radius
+    bottom = np.array([0.0, 0.0, 0.25])     # Start higher to fall onto bottom cylinder
+    # Generate Mesh (real muscle statistics: r = 0.04, h = 0.1 (in meters))
+    cylinder = pv.Cylinder(radius=0.25, height=1.0, center=(0, 0, 0), direction=(0, 1, 0), resolution=8).triangulate()
+    tet = tetgen.TetGen(cylinder)
+    vertices, tets = tet.tetrahedralize()
+    surface_faces = generate_surface_faces(tets)
+    cylinder2 = pv.Cylinder(radius=0.25, height=1.0, center=(0, 0, 0), direction=(1, 0, 0), resolution=8).triangulate()
+    tet2 = tetgen.TetGen(cylinder2)
+    vertices2, tets2 = tet2.tetrahedralize()
+    surface_faces2 = generate_surface_faces(tets2)
+    """
+    
+    meshes = [
+        #Mesh(top, vertices2, surface_faces2, tets2),
+        #Mesh(left, vertices, surface_faces, tets),
+        Mesh(right, vertices, surface_faces, tets)
+    ]
+    
+    try:
         for i in range(len(meshes)):
-            #rotate_fixed_vertex(simulator, i, centers[i] + np.array([0.0, 0.0, 1.0]), 1.0, np.radians(0.5))
-            #rotate_fixed_vertex(simulator, i, centers[i] + np.array([0.0, 0.0, -1.0]), -1.0, np.radians(-0.5))
-            simulator.step()
-            renderer.update_mesh_positions(i)
-            renderer.render()
-        time.sleep(DT)
+            renderer.add_mesh(meshes[i])
+            simulator.add_mesh(meshes[i])
+            #fix_surfaces(simulator, i, 1.5)
+            #fix_surfaces(simulator, i, 0.5)
+
+        while not renderer.should_close():
+            glfw.poll_events()
+            for i in range(len(meshes)):
+                #rotate_fixed_vertex(simulator, i, 1.5, np.radians(1.0))
+                #rotate_fixed_vertex(simulator, i, 0.5, np.radians(-1.0))
+                simulator.step()
+                renderer.update_meshes()
+                renderer.render()
+
+            time.sleep(DT)
     
-    for i in range(len(renderer)):
+    finally:
         renderer.cleanup()
-    
+
 def fix_surfaces(simulator, mesh_idx, z, tolerance=1e-5):
     for i in range(simulator.meshes[mesh_idx].numVertices):
         if abs(simulator.meshes[mesh_idx].positions[i, 2] - z) <= tolerance:
             simulator.meshes[mesh_idx].fixed_vertices.add(i)
             simulator.meshes[mesh_idx].invMasses[i] = 0.0
 
-def rotate_fixed_vertex(simulator, mesh_idx, center, z, angle):
+def rotate_fixed_vertex(simulator, mesh_idx, z, angle):
     for i in simulator.meshes[mesh_idx].fixed_vertices:
         if abs(simulator.meshes[mesh_idx].positions[i, 2] - z) < 1e-5:
-            local_coord = simulator.meshes[mesh_idx].positions[i] - center
+            local_coord = simulator.meshes[mesh_idx].positions[i] - np.array([0, 0, z])
             # Get current radius and angle of each vertex
             radius = np.linalg.norm(local_coord)
             if radius < 1e-5:
@@ -67,6 +90,6 @@ def rotate_fixed_vertex(simulator, mesh_idx, center, z, angle):
             movement = new_pos - local_coord
             simulator.meshes[mesh_idx].positions[i] += movement
             simulator.meshes[mesh_idx].prev_positions[i] += movement
-        
+
 if __name__ == "__main__":
     main()

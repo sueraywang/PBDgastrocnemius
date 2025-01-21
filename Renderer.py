@@ -1,8 +1,7 @@
 import glfw
-import numpy as np
-from OpenGL.GL import *
 from OpenGL.GL import shaders
 import pyrr
+from Mesh_edgeConstaint import *
 
 # Shader code remains the same
 vertex_shader = """
@@ -13,14 +12,13 @@ layout (location = 1) in vec3 aNormal;
 out vec3 FragPos;
 out vec3 Normal;
 
-uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
 
 void main()
 {
-    FragPos = vec3(model * vec4(aPos, 1.0));
-    Normal = mat3(transpose(inverse(model))) * aNormal;  
+    FragPos = aPos;
+    Normal = aNormal;  
     
     gl_Position = projection * view * vec4(FragPos, 1.0);
 }
@@ -62,94 +60,8 @@ void main()
 } 
 """
 
-class Mesh:
-    def __init__(self, vertices, faces, tets, color=np.array([0.75, 0.5, 0.1])):
-        self.vertices = vertices
-        self.faces = faces
-        self.tets = tets
-        self.color = color
-        self.model_matrix = pyrr.matrix44.create_identity()
-        self.setup_mesh()
-
-    def calculate_normals(self):
-        vertex_normals = np.zeros((len(self.vertices), 3))
-        vertex_counts = np.zeros(len(self.vertices))
-        
-        for face in self.faces:
-            v0, v1, v2 = self.vertices[face[0]], self.vertices[face[1]], self.vertices[face[2]]
-            edge1 = v1 - v0
-            edge2 = v2 - v0
-            normal = np.cross(edge1, edge2)
-            
-            length = np.linalg.norm(normal)
-            if length > 0:
-                normal = normal / length
-                
-            # Make normal point outward
-            face_center = (v0 + v1 + v2) / 3
-            to_center = np.zeros(3) - face_center
-            if np.dot(normal, to_center) > 0:
-                normal = -normal
-                
-            # Accumulate normals at vertices
-            for vertex_idx in face:
-                vertex_normals[vertex_idx] += normal
-                vertex_counts[vertex_idx] += 1
-        
-        # Average and normalize vertex normals
-        for i in range(len(vertex_normals)):
-            if vertex_counts[i] > 0:
-                vertex_normals[i] = vertex_normals[i] / vertex_counts[i]
-                length = np.linalg.norm(vertex_normals[i])
-                if length > 0:
-                    vertex_normals[i] = vertex_normals[i] / length
-                    
-        return vertex_normals
-
-    def setup_mesh(self):
-        self.normals = self.calculate_normals()
-        
-        # Combine vertex positions and normals
-        vertex_data = np.zeros((len(self.vertices), 6), dtype=np.float32)
-        vertex_data[:, 0:3] = self.vertices
-        vertex_data[:, 3:6] = self.normals
-        
-        indices = self.faces.flatten().astype(np.uint32)
-        self.num_indices = len(indices)
-
-        # Create and bind VAO
-        self.vao = glGenVertexArrays(1)
-        glBindVertexArray(self.vao)
-
-        # Create and bind VBO
-        self.vbo = glGenBuffers(1)
-        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-        glBufferData(GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data, GL_DYNAMIC_DRAW)
-
-        # Create and bind EBO
-        self.ebo = glGenBuffers(1)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
-
-        # Set vertex attributes
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(0))
-        glEnableVertexAttribArray(0)
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(12))
-        glEnableVertexAttribArray(1)
-
-    def update_positions(self, new_vertices):
-        self.vertices = new_vertices
-        self.normals = self.calculate_normals()
-        
-        vertex_data = np.zeros((len(self.vertices), 6), dtype=np.float32)
-        vertex_data[:, 0:3] = self.vertices
-        vertex_data[:, 3:6] = self.normals
-        
-        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-        glBufferData(GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data, GL_DYNAMIC_DRAW)
-
 class Renderer:
-    def __init__(self, width=800, height=600):
+    def __init__(self, width=800, height=600, cameraRadius = 5.0, lookAtPosition = np.array([0.0, 0.0, 0.5], dtype=np.float32)):
         # Initialize GLFW
         if not glfw.init():
             raise Exception("GLFW initialization failed")
@@ -179,9 +91,9 @@ class Renderer:
         glEnable(GL_LINE_SMOOTH)
 
         # Camera setup
-        self.target = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-        self.camera_distance = 5.0
-        self.theta = np.pi / 2 # Horizontal
+        self.target = lookAtPosition
+        self.camera_distance = cameraRadius
+        self.theta = -np.pi / 3 # Horizontal
         self.phi = np.pi / 3
         self.camera_up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
         self.convert_to_cartesian()
@@ -205,9 +117,9 @@ class Renderer:
     def add_mesh(self, mesh):
         self.meshes.append(mesh)
 
-    def update_mesh_positions(self, mesh_index):
-        if 0 <= mesh_index < len(self.meshes):
-            self.meshes[mesh_index].update_positions(self.meshes[mesh_index].vertices)
+    def update_meshes(self):
+        for mesh in self.meshes:
+            mesh.update_mesh(mesh.vertices)
 
     def render(self):
         glClearColor(0.2, 0.3, 0.3, 1.0)
@@ -222,7 +134,6 @@ class Renderer:
             self.camera_up
         )
         glUniformMatrix4fv(glGetUniformLocation(self.shader, "view"), 1, GL_FALSE, view)
-
         width, height = glfw.get_window_size(self.window)
         projection = pyrr.matrix44.create_perspective_projection_matrix(
             self.fov, width / height, 0.1, 100.0
@@ -230,13 +141,12 @@ class Renderer:
         glUniformMatrix4fv(glGetUniformLocation(self.shader, "projection"), 1, GL_FALSE, projection)
 
         # Set lighting uniforms
-        glUniform3fv(glGetUniformLocation(self.shader, "lightPos"), 1, np.array([0.0, 5.0, 5.0]))
+        glUniform3fv(glGetUniformLocation(self.shader, "lightPos"), 1, np.array([0.0, 0.0, 5.0]))
         glUniform3fv(glGetUniformLocation(self.shader, "viewPos"), 1, self.camera_pos)
         glUniform3fv(glGetUniformLocation(self.shader, "lightColor"), 1, np.array([1.0, 1.0, 1.0]))
 
         # Render each mesh
         for mesh in self.meshes:
-            glUniformMatrix4fv(glGetUniformLocation(self.shader, "model"), 1, GL_FALSE, mesh.model_matrix)
             glUniform3fv(glGetUniformLocation(self.shader, "objectColor"), 1, mesh.color)
 
             glBindVertexArray(mesh.vao)
@@ -249,6 +159,14 @@ class Renderer:
             glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
             glUniform3fv(glGetUniformLocation(self.shader, "objectColor"), 1, np.array([0.0, 0.0, 0.0]))
             glDrawElements(GL_TRIANGLES, mesh.num_indices, GL_UNSIGNED_INT, None)
+
+            """
+            # Render Normals
+            for mesh in self.meshes:
+                glBindVertexArray(mesh.normals_vao)
+                glUniform3fv(glGetUniformLocation(self.shader, "objectColor"), 1, np.array([1.0, 0.0, 0.0]))  # Red normals
+                glDrawArrays(GL_LINES, 0, len(mesh.normal_lines))
+            """
 
         glfw.swap_buffers(self.window)
         glfw.poll_events()
