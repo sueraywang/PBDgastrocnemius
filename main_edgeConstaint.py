@@ -10,12 +10,13 @@ def main():
     simulator = Simulator()
 
     # Position bottom cylinder on ground, top cylinder above it
-    top = np.array([0.3, 0.3, 0.9])  # Lift slightly to account for radius
-    bottom = np.array([0.0, 0.0, 1.25])     # Start higher to fall onto bottom cylinder
+    top = np.array([0.3, 0.3, 0.8])  # Lift slightly to account for radius
+    bottom = np.array([0.0, 0.0, 0.25])     # Start higher to fall onto bottom cylinder
     # Generate Mesh (real muscle statistics: r = 0.04, h = 0.1 (in meters), about 300 resolution)
-    cylinder = pv.Cylinder(radius=0.25, height=1.0, center=(0, 0, 0), direction=(0, 1, 0), resolution=16).triangulate()
+    cylinder = pv.Cylinder(radius=0.25, height=1.0, center=(0, 0, 0), direction=(0, 1, 0), resolution=300).triangulate()
     tet = tetgen.TetGen(cylinder)
     vertices, tets = tet.tetrahedralize()
+    print(vertices.shape)
     surface_faces = generate_surface_faces(tets)
     edges = generate_edges(tets)
 
@@ -45,7 +46,7 @@ def main():
     rotated_vertices = vertices @ R.T
 
     bodies = [
-        #Mesh(top, vertices, edges, surface_faces, tets),
+        Mesh(top, vertices, edges, surface_faces, tets),
         Mesh(bottom, rotated_vertices, edges, surface_faces, tets)
     ]
     

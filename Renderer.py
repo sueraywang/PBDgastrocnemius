@@ -119,7 +119,7 @@ class Renderer:
 
     def update_meshes(self):
         for mesh in self.meshes:
-            mesh.update_mesh(mesh.vertices)
+            mesh.update_mesh()
 
     def render(self):
         glClearColor(0.2, 0.3, 0.3, 1.0)

@@ -11,8 +11,6 @@ SUB_STEPS = 5
 EDGE_COMPLIANCE = 1e-5
 VOLUME_COMPLIANCE = 0.0
 COLLISION_COMPLIANCE = 0.0
-STATIC_COF = 0.2
-DYNAMIC_COF = 0.1
 
 class SoftBody:
     """Class to store the state and parameters of a single body"""
@@ -45,8 +43,6 @@ class SoftBody:
         self.grads = np.zeros((4, 3))
         self.edgeCompliance = edgeCompliance
         self.volCompliance = volCompliance
-        self.vertices_to_check = []
-        self.triangles_to_check = []
         self.collision_constraints = [] # Store active collision constraints of certain mesh
 
 class CollisionConstraint:
@@ -54,16 +50,12 @@ class CollisionConstraint:
         self.vertex_idx = vertex_idx
         self.trig_idx = trig_idx
         self.triangle_mesh_idx = triangle_mesh_idx
-        self.d_lambda = 0.0
-        self.weight = 0.0
 
 class Simulator:
-    def __init__(self, collisionCompliance = COLLISION_COMPLIANCE, staticFrictionCoefficient = STATIC_COF, dynamicFrictionCoefficient = DYNAMIC_COF):
+    def __init__(self, collisionCompliance = COLLISION_COMPLIANCE):
         self.bodies = [] # It stores all soft bodies
         self.volIdOrder = [[1,3,2], [0,2,3], [0,3,1], [0,1,2]]
         self.collisionCompliance = collisionCompliance
-        self.staticFrictionCoefficient = staticFrictionCoefficient
-        self.dynamicFrictionCoefficient = dynamicFrictionCoefficient
 
     def add_body(self, mesh):
         body = SoftBody(mesh)
@@ -121,19 +113,10 @@ class Simulator:
             for body in self.bodies: # It makes sure that all bodies' current position is predicted before we solve constraints
                 self.solve_volume_constraint(body, dt)
                 self.solve_edge_constraint(body, dt)
-                self.solve_collision_constraints(body, self.staticFrictionCoefficient, dt)
+                self.solve_collision_constraints(body, dt)
             
             for body in self.bodies: # It makes sure that all bodies' constrains are solved before we update velocity
                 body.velocities = (body.positions - body.prev_positions) / dt
-            
-                # Apply dynamic friction
-                for constraint in body.collision_constraints:
-                    normal = self.bodies[constraint.triangle_mesh_idx].mesh.face_normals[constraint.trig_idx]
-                    normal_vel = np.dot(body.velocities[constraint.vertex_idx], normal) * normal
-                    tangential_vel = body.velocities[constraint.vertex_idx] - normal_vel
-                    del_vel = -min(self.dynamicFrictionCoefficient * constraint.d_lambda / dt * constraint.weight, np.linalg.norm(tangential_vel)) * tangential_vel / np.linalg.norm(tangential_vel)
-                    body.velocities[constraint.vertex_idx] += del_vel
-
 
     def solve_edge_constraint(self, body, dt):
         for edgeNr in range(body.numEdges):
@@ -261,7 +244,7 @@ class Simulator:
         # Check if point is in triangle
         return (u >= 0) and (v >= 0) and (u + v <= 1)
     
-    def solve_collision_constraints(self, body, staticCOF, dt):
+    def solve_collision_constraints(self, body, dt):
         for constraint in body.collision_constraints:
             vertex = body.positions[constraint.vertex_idx]
             trig_body = self.bodies[constraint.triangle_mesh_idx]
@@ -279,19 +262,8 @@ class Simulator:
                 
             alpha = self.collisionCompliance / dt / dt
             d_lambda = -C / (total_weight + alpha)
-            correction = w_vertex * d_lambda * normal
-
-            # Calculate tangential frictions
-            d_p = body.positions[constraint.vertex_idx] - body.prev_positions[constraint.vertex_idx]
-            d_tangent = d_p - np.dot(d_p, normal) * normal
-            d_lambda_T = np.linalg.norm(d_tangent) / (total_weight + alpha)
-            if (d_lambda_T < staticCOF * d_lambda):
-                correction -= d_tangent
             
             # Apply corrections
-            body.positions[constraint.vertex_idx] += correction
+            body.positions[constraint.vertex_idx] += w_vertex * d_lambda * normal
             for i in range(3):
                 trig_body.positions[trig[i]] -= (trig_body.invMasses[trig[i]] * d_lambda * normal)
-
-            constraint.d_lambda = d_lambda
-            constraint.weight = total_weight

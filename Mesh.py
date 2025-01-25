@@ -83,11 +83,8 @@ class Mesh:
         glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(12))
         glEnableVertexAttribArray(1)
 
-    def update_mesh(self, new_vertices):
-        self.vertices = new_vertices
+    def update_mesh(self):
         self.center = np.mean(self.vertices, axis=0)
-        self.face_normals = self.calculate_face_normals()
-        self.vertex_normals = self.calculate_vertex_normals()
         
         vertex_data = np.zeros((len(self.vertices), 6), dtype=np.float32)
         vertex_data[:, 0:3] = self.vertices
