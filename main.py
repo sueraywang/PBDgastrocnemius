@@ -1,45 +1,59 @@
 import time
-from Renderer import *
-from Physics_copy import *
-from FileReader import *
-import pyvista as pv
 import tetgen
+from colorGraph import *
+from Renderer import *
+from Physics import *
+
+fixed_index = 3
 
 def main():    
     # Initialize renderer and simulator
-    renderer = Renderer()
+    renderer = Renderer(cameraRadius=6.0, lookAtPosition=np.array([0.0, 0.0, 1.0]), h_angle=-np.pi/2, v_angle=np.pi/2)
     simulator = Simulator()
 
-    #"""
     # Position bottom cylinder on ground, top cylinder above it
-    left = np.array([-0.3, 0.0, 1.0])  # Lift slightly to account for radius
-    right = np.array([0.3, 0.0, 1.0])     # Start higher to fall onto bottom cylinder
-    # Generate Mesh (real muscle statistics: r = 0.04, h = 0.1 (in meters))
-    cylinder = pv.Cylinder(radius=0.25, height=1.0, center=(0, 0, 0), direction=(1, 0, 0.5), resolution=16).triangulate()
-    tet = tetgen.TetGen(cylinder)
-    vertices, tets = tet.tetrahedralize()
-    surface_faces = generate_surface_faces(tets)
-    
-    """
-
-    # Position bottom cylinder on ground, top cylinder above it
-    top = np.array([0.3, 0.3, 0.8])  # Lift slightly to account for radius
+    top = np.array([0.0, 0.0, 2.0])  # Lift slightly to account for radius
     bottom = np.array([0.0, 0.0, 0.25])     # Start higher to fall onto bottom cylinder
-    # Generate Mesh (real muscle statistics: r = 0.04, h = 0.1 (in meters))
-    cylinder = pv.Cylinder(radius=0.25, height=1.0, center=(0, 0, 0), direction=(0, 1, 0), resolution=8).triangulate()
+    
+    """
+    # Generate Mesh (real muscle statistics: r = 0.04, h = 0.1 (in meters), about 300 resolution)
+    cylinder = pv.Cylinder(radius=0.25, height=1.0, center=(0, 0, 0), direction=(0, 0.5, 0.5), resolution=1).triangulate()
     tet = tetgen.TetGen(cylinder)
     vertices, tets = tet.tetrahedralize()
     surface_faces = generate_surface_faces(tets)
-    cylinder2 = pv.Cylinder(radius=0.25, height=1.0, center=(0, 0, 0), direction=(1, 0, 0), resolution=8).triangulate()
-    tet2 = tetgen.TetGen(cylinder2)
-    vertices2, tets2 = tet2.tetrahedralize()
-    surface_faces2 = generate_surface_faces(tets2)
     """
+    # Get the vertices (points)
+    tetrahedron = pv.Tetrahedron()
+    tet = tetgen.TetGen(tetrahedron)
+    #vertices, tets = tet.tetrahedralize()
+    vertices = tetrahedron.points
+    tets = np.array([[0, 1, 2, 3]])
+    print(vertices, tets)
+    surface_faces = tetrahedron.faces.reshape(-1, 4)[:, 1:]  # Ignore the size indicator
+    #"""
+    #mesh_size = compute_min_vertex_distance(vertices)
+    #print(f"Minimum vertex-to-vertex distance (mesh size): {mesh_size}")
+    #print(vertices.shape)
     
+    R1 = np.array([
+        [1, 0, 0],
+        [0, 0, -1],
+        [0, 1, 0]
+    ])
+    R2 = np.array([
+        [0, 0, 1],
+        [0, 1, 0],
+        [-1, 0, 0]
+    ])
+    R3 = np.array([
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1]
+    ])
+
     meshes = [
-        #Mesh(top, vertices2, surface_faces2, tets2),
-        #Mesh(left, vertices, surface_faces, tets),
-        Mesh(right, vertices, surface_faces, tets)
+        Mesh(top, vertices, surface_faces, tets)
+        #Mesh(bottom, vertices @ R2.T, surface_faces, tets)
     ]
     
     try:
@@ -48,6 +62,9 @@ def main():
             simulator.add_mesh(meshes[i])
             #fix_surfaces(simulator, i, 1.5)
             #fix_surfaces(simulator, i, 0.5)
+
+            simulator.bodies[i].fixed_vertices.add(fixed_index)
+            simulator.bodies[i].invMasses[fixed_index] = 0.0
 
         while not renderer.should_close():
             glfw.poll_events()

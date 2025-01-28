@@ -8,7 +8,7 @@ DT = 0.01  # second
 
 # XPBD constants
 SUB_STEPS = 5
-DEVIATORIC_COMPLIANCE = 1.0/100000.0
+DEVIATORIC_COMPLIANCE = 1e-5
 VOLUME_COMPLIANCE = 0.0
 COLLISION_COMPLIANCE = 1e-3  # Stiffness for collision response
 

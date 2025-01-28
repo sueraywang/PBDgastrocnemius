@@ -1,9 +1,9 @@
 import glfw
 from OpenGL.GL import shaders
 import pyrr
-from Mesh_edgeConstaint import *
+from Mesh import *
 
-# Shader code remains the same
+# Main shader code remains the same
 vertex_shader = """
 #version 330 core
 layout (location = 0) in vec3 aPos;
@@ -19,7 +19,6 @@ void main()
 {
     FragPos = aPos;
     Normal = aNormal;  
-    
     gl_Position = projection * view * vec4(FragPos, 1.0);
 }
 """
@@ -60,8 +59,38 @@ void main()
 } 
 """
 
+# Simplified coordinate axes shaders
+axes_vertex_shader = """
+#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aColor;
+
+out vec3 vertexColor;
+
+uniform mat4 view;
+uniform mat4 projection;
+
+void main()
+{
+    gl_Position = projection * view * vec4(aPos, 1.0);
+    vertexColor = aColor;
+}
+"""
+
+axes_fragment_shader = """
+#version 330 core
+in vec3 vertexColor;
+out vec4 FragColor;
+
+void main()
+{
+    FragColor = vec4(vertexColor, 1.0);
+}
+"""
+
 class Renderer:
-    def __init__(self, width=800, height=600, cameraRadius = 5.0, lookAtPosition = np.array([0.0, 0.0, 0.5], dtype=np.float32)):
+    def __init__(self, width=800, height=600, cameraRadius = 5.0, lookAtPosition = np.array([0.0, 0.0, 0.0]), 
+                 h_angle=-np.pi/2, v_angle=np.pi/2, dtype=np.float32):
         # Initialize GLFW
         if not glfw.init():
             raise Exception("GLFW initialization failed")
@@ -69,6 +98,10 @@ class Renderer:
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
         glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
         glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, GL_TRUE)
+
+        # Ground plane settings
+        self.ground_size = 10.0  # Size of the ground plane
+        self.ground_color = np.array([0.8, 0.8, 0.8], dtype=np.float32)  # Light gray
 
         # Create window
         self.window = glfw.create_window(width, height, "Multi-Mesh Renderer", None, None)
@@ -93,8 +126,8 @@ class Renderer:
         # Camera setup
         self.target = lookAtPosition
         self.camera_distance = cameraRadius
-        self.theta = -np.pi / 3 # Horizontal
-        self.phi = np.pi / 3
+        self.theta = h_angle # Horizontal
+        self.phi = v_angle
         self.camera_up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
         self.convert_to_cartesian()
 
@@ -109,10 +142,82 @@ class Renderer:
         self.middle_mouse_pressed = False
 
         # Compile shaders
-        self.shader = self.compile_shader_program()
+        self.shader = self.compile_shader_program(vertex_shader, fragment_shader)
+        self.axes_shader = self.compile_shader_program(axes_vertex_shader, axes_fragment_shader)
 
         # Initialize mesh collection
         self.meshes = []
+        
+        # Setup ground plane
+        self.setup_ground_plane()
+        
+        # Setup coordinate axes
+        self.setup_coordinate_axes()
+
+    def setup_ground_plane(self):
+        """Setup the ground plane VAO and buffers with a checkered pattern"""
+        s = self.ground_size
+        tiles = 20  # Number of tiles in each direction
+        tile_size = (2 * s) / tiles
+        vertices = []
+        indices = []
+        vertex_count = 0
+
+        # Create vertices and indices for each tile
+        for i in range(tiles):
+            for j in range(tiles):
+                # Calculate tile corners
+                x1 = -s + i * tile_size
+                x2 = x1 + tile_size
+                y1 = -s + j * tile_size
+                y2 = y1 + tile_size
+                
+                # Add vertices for this tile (position and normal)
+                vertices.extend([
+                    x1, y1, 0.0,  0.0, 0.0, 1.0,  # Bottom-left
+                    x2, y1, 0.0,  0.0, 0.0, 1.0,  # Bottom-right
+                    x2, y2, 0.0,  0.0, 0.0, 1.0,  # Top-right
+                    x1, y2, 0.0,  0.0, 0.0, 1.0,  # Top-left
+                ])
+
+                # Add indices for this tile
+                indices.extend([
+                    vertex_count, vertex_count + 1, vertex_count + 2,  # First triangle
+                    vertex_count + 2, vertex_count + 3, vertex_count   # Second triangle
+                ])
+                vertex_count += 4
+
+        vertices = np.array(vertices, dtype=np.float32)
+        indices = np.array(indices, dtype=np.uint32)
+
+        # Store the number of tiles for rendering
+        self.ground_tiles = tiles
+        self.ground_indices_count = len(indices)
+
+        # Create and bind VAO
+        self.ground_vao = glGenVertexArrays(1)
+        glBindVertexArray(self.ground_vao)
+
+        # Create and bind VBO
+        self.ground_vbo = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, self.ground_vbo)
+        glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
+
+        # Create and bind EBO
+        self.ground_ebo = glGenBuffers(1)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ground_ebo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
+
+        # Set vertex attributes
+        # Position attribute
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(0)
+        # Normal attribute
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(12))
+        glEnableVertexAttribArray(1)
+
+        # Unbind VAO
+        glBindVertexArray(0)
 
     def add_mesh(self, mesh):
         self.meshes.append(mesh)
@@ -125,6 +230,7 @@ class Renderer:
         glClearColor(0.2, 0.3, 0.3, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
+        # Main scene rendering with regular shader
         glUseProgram(self.shader)
 
         # Set view and projection matrices
@@ -145,10 +251,27 @@ class Renderer:
         glUniform3fv(glGetUniformLocation(self.shader, "viewPos"), 1, self.camera_pos)
         glUniform3fv(glGetUniformLocation(self.shader, "lightColor"), 1, np.array([1.0, 1.0, 1.0]))
 
-        # Render each mesh
+        # Render the ground plane
+        glBindVertexArray(self.ground_vao)
+        # Draw ground faces with alternating colors
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+        for i in range(self.ground_tiles):
+            for j in range(self.ground_tiles):
+                # Calculate the index for this tile
+                tile_index = (i * self.ground_tiles + j) * 6  # 6 indices per tile
+                
+                # Set color based on checkerboard pattern
+                if (i + j) % 2 == 0:
+                    color = np.array([0.7, 0.7, 0.7], dtype=np.float32)  # White
+                else:
+                    color = np.array([0.3, 0.3, 0.3], dtype=np.float32)  # Dark grey
+                
+                glUniform3fv(glGetUniformLocation(self.shader, "objectColor"), 1, color)
+                glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, ctypes.c_void_p(tile_index * 4))
+
+        # Render meshes
         for mesh in self.meshes:
             glUniform3fv(glGetUniformLocation(self.shader, "objectColor"), 1, mesh.color)
-
             glBindVertexArray(mesh.vao)
             
             # Draw faces
@@ -160,18 +283,20 @@ class Renderer:
             glUniform3fv(glGetUniformLocation(self.shader, "objectColor"), 1, np.array([0.0, 0.0, 0.0]))
             glDrawElements(GL_TRIANGLES, mesh.num_indices, GL_UNSIGNED_INT, None)
 
-            """
-            # Render Normals
-            for mesh in self.meshes:
-                glBindVertexArray(mesh.normals_vao)
-                glUniform3fv(glGetUniformLocation(self.shader, "objectColor"), 1, np.array([1.0, 0.0, 0.0]))  # Red normals
-                glDrawArrays(GL_LINES, 0, len(mesh.normal_lines))
-            """
+        # Render coordinate axes
+        glUseProgram(self.axes_shader)
+        
+        # Set view and projection matrices for axes
+        glUniformMatrix4fv(glGetUniformLocation(self.axes_shader, "view"), 1, GL_FALSE, view)
+        glUniformMatrix4fv(glGetUniformLocation(self.axes_shader, "projection"), 1, GL_FALSE, projection)
+        
+        # Draw axes
+        glBindVertexArray(self.axes_vao)
+        glDrawArrays(GL_LINES, 0, 6)  # Draw 3 lines (2 vertices each)
 
         glfw.swap_buffers(self.window)
         glfw.poll_events()
 
-    # Camera and input handling methods remain the same
     def convert_to_cartesian(self):
         x = self.camera_distance * np.sin(self.phi) * np.cos(self.theta)
         y = self.camera_distance * np.sin(self.phi) * np.sin(self.theta)
@@ -220,22 +345,33 @@ class Renderer:
 
     def scroll_callback(self, window, xoffset, yoffset):
         self.camera_distance -= yoffset * 0.5
-        self.camera_distance = max(2.0, min(50.0, self.camera_distance))
+        self.camera_distance = max(0.5, min(50.0, self.camera_distance))
         self.convert_to_cartesian()
 
     def framebuffer_size_callback(self, window, width, height):
         glViewport(0, 0, width, height)
 
-    def compile_shader_program(self):
-        vert_shader = shaders.compileShader(vertex_shader, GL_VERTEX_SHADER)
-        frag_shader = shaders.compileShader(fragment_shader, GL_FRAGMENT_SHADER)
-        shader_program = shaders.compileProgram(vert_shader, frag_shader)
-        return shader_program
+    def compile_shader_program(self, vertex_source, fragment_source):
+        vert_shader = shaders.compileShader(vertex_source, GL_VERTEX_SHADER)
+        frag_shader = shaders.compileShader(fragment_source, GL_FRAGMENT_SHADER)
+        program = shaders.compileProgram(vert_shader, frag_shader)
+        return program
 
     def should_close(self):
         return glfw.window_should_close(self.window)
 
     def cleanup(self):
+        # Clean up ground plane resources
+        glDeleteVertexArrays(1, [self.ground_vao])
+        glDeleteBuffers(1, [self.ground_vbo])
+        glDeleteBuffers(1, [self.ground_ebo])
+        
+        # Delete axes resources
+        glDeleteVertexArrays(1, [self.axes_vao])
+        for vbo in self.axes_vbos:
+            glDeleteBuffers(1, [vbo])
+        glDeleteProgram(self.axes_shader)
+        
         # Clean up all mesh resources
         for mesh in self.meshes:
             glDeleteVertexArrays(1, [mesh.vao])
@@ -247,3 +383,54 @@ class Renderer:
         
         # Terminate GLFW
         glfw.terminate()
+
+    def setup_coordinate_axes(self):
+        """Setup the coordinate axes VAO and buffers"""
+        # Create vertices for three orthogonal lines
+        vertices = np.array([
+            # X axis line (red)
+            0.0, 10.0, 0.0,
+            1.0, 10.0, 0.0,
+            # Y axis line (green)
+            0.0, 10.0, 0.0,
+            0.0, 11.0, 0.0,
+            # Z axis line (blue)
+            0.0, 10.0, 0.0,
+            0.0, 10.0, 1.0
+        ], dtype=np.float32)
+        
+        colors = np.array([
+            # X axis color (red)
+            1.0, 0.0, 0.0,
+            1.0, 0.0, 0.0,
+            # Y axis color (green)
+            0.0, 1.0, 0.0,
+            0.0, 1.0, 0.0,
+            # Z axis color (blue)
+            0.0, 0.0, 1.0,
+            0.0, 0.0, 1.0
+        ], dtype=np.float32)
+
+        # Create and bind VAO
+        self.axes_vao = glGenVertexArrays(1)
+        glBindVertexArray(self.axes_vao)
+
+        # Create and bind VBO for vertices
+        vbo_vertices = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_vertices)
+        glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, None)
+        glEnableVertexAttribArray(0)
+
+        # Create and bind VBO for colors
+        vbo_colors = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_colors)
+        glBufferData(GL_ARRAY_BUFFER, colors.nbytes, colors, GL_STATIC_DRAW)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, None)
+        glEnableVertexAttribArray(1)
+
+        # Unbind VAO
+        glBindVertexArray(0)
+
+        # Store VBOs for cleanup
+        self.axes_vbos = [vbo_vertices, vbo_colors]
