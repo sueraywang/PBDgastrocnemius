@@ -1,23 +1,13 @@
-import pyvista as pv
+import numpy as np
 
-# Create a tetrahedron mesh
-tetrahedron = pv.Tetrahedron()
+# Define your three vectors
+v1 = np.array([[1, 1, 1], [11, 11, 11]])  # First vector
+v2 = np.array([[2, 2, 2], [22, 22, 22]])  # Second vector
+v3 = np.array([[3, 3, 3], [33, 33, 33]])  # Third vector
 
-# Get the vertices (points)
-vertices = tetrahedron.points
+# Stack using transpose
+matrix = np.stack((v1, v2, v3), axis=1)
 
-# Tetrahedron `PolyData` does not directly store tetrahedral connectivity. 
-# However, its surface triangles are stored in the `faces` attribute.
-
-# Extract surface faces (triangle connectivity)
-faces = tetrahedron.faces.reshape(-1, 4)  # Each face has 1 size indicator + 3 vertex indices
-triangle_faces = faces[:, 1:]  # Ignore the size indicator
-
-# Note: Since this is `PolyData`, the tetrahedral connectivity is not directly available.
-
-# Display the results
-print("Vertices (Points):")
-print(vertices)
-
-print("\nSurface Faces (Triangle Connectivity):")
-print(triangle_faces)
+# Print the result
+print("Matrix with vectors as columns:")
+print(matrix)

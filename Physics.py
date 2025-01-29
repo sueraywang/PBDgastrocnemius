@@ -113,7 +113,7 @@ class Simulator:
         edge2 = body.positions[vIds[2]] - body.positions[vIds[0]]
         edge3 = body.positions[vIds[3]] - body.positions[vIds[0]]
         body.P = np.array([edge1, edge2, edge3])
-        body.F = body.P @ body.invRestPoses[tetNr]
+        body.F = body.invRestPoses[tetNr] @ body.P
         r_s = np.sqrt(np.dot(body.F[0], body.F[0]) + 
                      np.dot(body.F[1], body.F[1]) + 
                      np.dot(body.F[2], body.F[2]))
@@ -121,7 +121,7 @@ class Simulator:
         
         C = r_s
         body.grads = np.zeros((4, 3))
-        product = r_s_inv * body.F @ np.transpose(body.invRestPoses[tetNr])
+        product = r_s_inv * np.transpose(body.invRestPoses[tetNr]) @ body.F
         body.grads[1] = product[0]
         body.grads[2] = product[1]
         body.grads[3] = product[2]
@@ -133,7 +133,7 @@ class Simulator:
         edge2 = body.positions[vIds[2]] - body.positions[vIds[0]]
         edge3 = body.positions[vIds[3]] - body.positions[vIds[0]]
         body.P = np.array([edge1, edge2, edge3])
-        body.F = body.P @ body.invRestPoses[tetNr]
+        body.F = body.invRestPoses[tetNr] @ body.P
         body.dF[0] = np.cross(body.F[1], body.F[2])
         body.dF[1] = np.cross(body.F[2], body.F[0])
         body.dF[2] = np.cross(body.F[0], body.F[1])
@@ -141,7 +141,7 @@ class Simulator:
         
         C = vol - 1.0 - body.volCompliance / body.devCompliance
         body.grads = np.zeros((4, 3))
-        product = body.dF @ np.transpose(body.invRestPoses[tetNr])
+        product = np.transpose(body.invRestPoses[tetNr]) @ body.dF
         body.grads[1] = product[0]
         body.grads[2] = product[1]
         body.grads[3] = product[2]
@@ -151,9 +151,7 @@ class Simulator:
         if C == 0.0:
             return
         
-        body.grads[0] = -body.grads[1]
-        body.grads[0] -= body.grads[2]
-        body.grads[0] -= body.grads[3]
+        body.grads[0] = -body.grads[1] - body.grads[2] - body.grads[3]
         
         w = 0.0
         for i in range(4):

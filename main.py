@@ -15,9 +15,9 @@ def main():
     top = np.array([0.0, 0.0, 2.0])  # Lift slightly to account for radius
     bottom = np.array([0.0, 0.0, 0.25])     # Start higher to fall onto bottom cylinder
     
-    """
+    #"""
     # Generate Mesh (real muscle statistics: r = 0.04, h = 0.1 (in meters), about 300 resolution)
-    cylinder = pv.Cylinder(radius=0.25, height=1.0, center=(0, 0, 0), direction=(0, 0.5, 0.5), resolution=1).triangulate()
+    cylinder = pv.Cylinder(radius=0.25, height=1.0, center=(0, 0, 0), direction=(0, 0.5, 0.5), resolution=16).triangulate()
     tet = tetgen.TetGen(cylinder)
     vertices, tets = tet.tetrahedralize()
     surface_faces = generate_surface_faces(tets)
@@ -25,12 +25,12 @@ def main():
     # Get the vertices (points)
     tetrahedron = pv.Tetrahedron()
     tet = tetgen.TetGen(tetrahedron)
-    #vertices, tets = tet.tetrahedralize()
-    vertices = tetrahedron.points
-    tets = np.array([[0, 1, 2, 3]])
+    vertices, tets = tet.tetrahedralize()
+    #vertices = tetrahedron.points
+    #tets = np.array([[0, 1, 2, 3]])
     print(vertices, tets)
     surface_faces = tetrahedron.faces.reshape(-1, 4)[:, 1:]  # Ignore the size indicator
-    #"""
+    """
     #mesh_size = compute_min_vertex_distance(vertices)
     #print(f"Minimum vertex-to-vertex distance (mesh size): {mesh_size}")
     #print(vertices.shape)
@@ -63,8 +63,8 @@ def main():
             #fix_surfaces(simulator, i, 1.5)
             #fix_surfaces(simulator, i, 0.5)
 
-            simulator.bodies[i].fixed_vertices.add(fixed_index)
-            simulator.bodies[i].invMasses[fixed_index] = 0.0
+            #simulator.bodies[i].fixed_vertices.add(fixed_index)
+            #simulator.bodies[i].invMasses[fixed_index] = 0.0
 
         while not renderer.should_close():
             glfw.poll_events()
