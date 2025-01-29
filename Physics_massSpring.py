@@ -7,7 +7,7 @@ GRAVITY = np.array([0.0, 0.0, -9.8])  # m/s**2
 DT = 0.01  # second
 
 # XPBD constants
-SUB_STEPS = 5
+SUB_STEPS = 20
 EDGE_COMPLIANCE = 1e-5
 VOLUME_COMPLIANCE = 0.0
 COLLISION_COMPLIANCE = 0.0
