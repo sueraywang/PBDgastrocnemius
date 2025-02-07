@@ -1,5 +1,6 @@
 import numpy as np
 import pyvista as pv
+import tetgen
 from collections import defaultdict
 
 def generate_edges(tets):
@@ -189,7 +190,7 @@ def visualize_colored_tetrahedra(vertices, tets, colors):
         grid, 
         scalars="colors",
         cmap="tab20",
-        opacity=0.2,  # More transparent to see internal structure
+        opacity=0.6,  # More transparent to see internal structure
         show_edges=True,
         edge_color='black',
         line_width=1,
@@ -202,9 +203,20 @@ def visualize_colored_tetrahedra(vertices, tets, colors):
     
     # Set multiple camera views for better understanding
     plotter.camera_position = 'iso'
-    plotter.camera.zoom(1.5)
     
     # Add axes for orientation
     plotter.add_axes()
     
     plotter.show()
+
+"""
+cylinder = pv.Cylinder(radius=0.25, height=1.0, center=(0, 0, 0), direction=(0, 0, 1.0), resolution=16).triangulate()
+tet = tetgen.TetGen(cylinder)
+vertices, tets = tet.tetrahedralize()
+print(f"num of tets: {tets.shape}")
+surface_faces = generate_surface_faces(tets)    
+tet_colors = color_tetrahedra(tets)
+numColors = np.unique(tet_colors)
+print(f"num of tets colors: {numColors.shape}")
+visualize_colored_tetrahedra(vertices, tets, tet_colors)
+"""

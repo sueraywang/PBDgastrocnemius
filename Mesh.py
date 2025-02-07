@@ -10,7 +10,11 @@ class Mesh:
         self.center = center # geometric center of mesh in world space
         self.face_normals = self.calculate_face_normals()
         self.vertex_normals = self.calculate_vertex_normals()
+        
+        self.collision_active = np.zeros(len(vertices), dtype=np.float32)
+
         self.setup_mesh()
+        self.setup_collision_visualization()
         #self.setup_face_normals_visualization()
 
     def calculate_face_normals(self):  
@@ -54,6 +58,15 @@ class Mesh:
                     
         return vertex_normals
     
+    def setup_collision_visualization(self):
+        self.collision_active_vbo = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, self.collision_active_vbo)
+        glBufferData(GL_ARRAY_BUFFER, self.collision_active.nbytes, self.collision_active, GL_DYNAMIC_DRAW)
+        
+        glBindVertexArray(self.vao)
+        glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 4, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(2)
+
     def setup_mesh(self):
         # Combine vertex positions and normals
         vertex_data = np.zeros((len(self.vertices), 6), dtype=np.float32)
@@ -83,6 +96,33 @@ class Mesh:
         glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(12))
         glEnableVertexAttribArray(1)
 
+    def update_collision_visualization(self, colliding_vertices, colliding_faces, vertex_offset, face_offset):
+        self.collision_active.fill(0.0)
+        
+        # Filter vertices that belong to this mesh
+        mesh_colliding_vertices = []
+        for v_idx in colliding_vertices:
+            if v_idx >= vertex_offset and v_idx < vertex_offset + len(self.vertices):
+                mesh_colliding_vertices.append(v_idx - vertex_offset)
+        
+        # Filter faces that belong to this mesh
+        mesh_colliding_faces = []
+        for f_idx in colliding_faces:
+            if f_idx >= face_offset and f_idx < face_offset + len(self.faces):
+                mesh_colliding_faces.append(f_idx - face_offset)
+        
+        # Set active flag for colliding vertices and faces
+        if mesh_colliding_vertices:
+            self.collision_active[mesh_colliding_vertices] = 1.0
+            
+        for face_idx in mesh_colliding_faces:
+            face_vertices = self.faces[face_idx]
+            self.collision_active[face_vertices] = 1.0
+        
+        # Update GPU buffer
+        glBindBuffer(GL_ARRAY_BUFFER, self.collision_active_vbo)
+        glBufferData(GL_ARRAY_BUFFER, self.collision_active.nbytes, self.collision_active, GL_DYNAMIC_DRAW)
+
     def update_mesh(self):
         self.center = np.mean(self.vertices, axis=0)
         
@@ -94,7 +134,7 @@ class Mesh:
         glBufferData(GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data, GL_DYNAMIC_DRAW)
 
         #self.setup_face_normals_visualization()
-    
+        
     def setup_face_normals_visualization(self):
         normal_lines = []
         for i, face in enumerate(self.faces):

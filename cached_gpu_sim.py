@@ -12,7 +12,7 @@ SUB_STEPS = 20
 POSSION_RATIO = 0.4
 DEVIATORIC_COMPLIANCE = 2e-4
 COLLISION_COMPLIANCE = 0.0
-COLLISION_THRESHOLD = 0.01
+COLLISION_THRESHOLD = 0.1
 
 mu = 1/DEVIATORIC_COMPLIANCE
 YOUNG_MODULUS = 2 * mu * (1 + POSSION_RATIO)
@@ -49,26 +49,21 @@ class CollisionInfo:
     triangle_collision_distances: wp.array(dtype=wp.float32)    # Distance to each colliding vertex
 
 class Simulator:
-    def __init__(self, meshes=None, device="cuda", density=DENSITY, 
-                 devCompliance=DEVIATORIC_COMPLIANCE, 
-                 volCompliance=VOLUME_COMPLIANCE, 
-                 collisionCompliance=COLLISION_COMPLIANCE, 
-                 collisionThreshold=COLLISION_THRESHOLD):
+    def __init__(self, meshes=None, density=DENSITY, devCompliance=DEVIATORIC_COMPLIANCE, volCompliance=VOLUME_COMPLIANCE, collisionCompliance=COLLISION_COMPLIANCE, collisionThreshold = COLLISION_THRESHOLD):
         self.frameCount = 0.0
         self.meshes = meshes
         self.density = density
         self.devCompliance = devCompliance
         self.volCompliance = volCompliance
         self.collisionCompliance = collisionCompliance
-        self.device = device
         
         # Collision detection parameters
-        self.collision_buffer_size = 8
-        self.collisionThreshold = collisionThreshold
+        self.collision_buffer_size = 8  # Each vertex/triangle can store up to 8 collisions
+        self.collisionThreshold = collisionThreshold  # Minimum vertex-to-vertex distance
         
         if self.meshes is not None:
             self.init_simulator()
-            
+        
     def add_bodies(self, meshes):
         self.meshes = meshes
         self.init_simulator()
@@ -92,73 +87,121 @@ class Simulator:
             all_tets = np.concatenate((all_tets, mesh.tets + len(all_vetices)), axis=0)
             all_faces = np.concatenate((all_faces, mesh.faces + len(all_vetices)), axis=0)
             all_vetices = np.concatenate((all_vetices, mesh.vertices), axis=0)
-        
-        self.vertexOffsets = wp.array(np.array(vertex_offsets).astype(np.int32), dtype=wp.int32, device=self.device)
-        self.tetOffsets = wp.array(np.array(tet_offsets).astype(np.int32), dtype=wp.int32, device=self.device)
-        self.faceOffsets = wp.array(np.array(face_offsets).astype(np.int32), dtype=wp.int32, device=self.device)
+            
+        self.vertexOffsets = wp.array(np.array(vertex_offsets).astype(np.int32), dtype=wp.int32, device = "cuda")
+        self.tetOffsets = wp.array(np.array(tet_offsets).astype(np.int32), dtype=wp.int32, device = "cuda")
+        self.faceOffsets = wp.array(np.array(face_offsets).astype(np.int32), dtype=wp.int32, device = "cuda")
         
         # Vertices
         self.numVertices = len(all_vetices)
-        self.positions = wp.array(all_vetices.astype(np.float32), dtype = wp.vec3, device=self.device)
-        self.prev_positions = wp.array(all_vetices.astype(np.float32), dtype = wp.vec3, device=self.device)
-        self.corrections = wp.zeros(self.numVertices, dtype = wp.vec3, device=self.device)
-        self.velocities = wp.zeros(self.numVertices, dtype=wp.vec3, device=self.device)
-        self.invMasses = wp.zeros(self.numVertices, dtype=wp.float32, device=self.device)
-        self.vertexNormals = wp.zeros(self.numVertices, dtype = wp.vec3, device=self.device)
-        self.vertexNormalCounts = wp.zeros(self.numVertices, dtype=wp.int32, device=self.device)
+        self.positions = wp.array(all_vetices.astype(np.float32), dtype = wp.vec3, device = "cuda")
+        self.prev_positions = wp.array(all_vetices.astype(np.float32), dtype = wp.vec3, device = "cuda")
+        self.corrections = wp.zeros(self.numVertices, dtype = wp.vec3, device = "cuda")
+        self.velocities = wp.zeros(self.numVertices, dtype=wp.vec3, device="cuda")
+        self.invMasses = wp.zeros(self.numVertices, dtype=wp.float32, device="cuda")
+        self.vertexNormals = wp.zeros(self.numVertices, dtype = wp.vec3, device = "cuda")
+        self.vertexNormalCounts = wp.zeros(self.numVertices, dtype=wp.int32, device = "cuda")
         
         # Tetrahedrons
         self.numTets = len(all_tets)
-        self.tetIds = wp.array(all_tets.astype(np.int32), dtype=wp.int32, device=self.device)
-        self.invRestVolumes = wp.zeros(self.numTets, dtype = wp.float32, device=self.device)
-        self.invRestPoses = wp.zeros(self.numTets, dtype = wp.mat33, device=self.device)
+        self.tetIds = wp.array(all_tets.astype(np.int32), dtype=wp.int32, device = "cuda")
+        self.invRestVolumes = wp.zeros(self.numTets, dtype = wp.float32, device = "cuda")
+        self.invRestPoses = wp.zeros(self.numTets, dtype = wp.mat33, device = "cuda")
         
         # Faces
         self.numFaces = len(all_faces)
-        self.faceIds = wp.array(all_faces.astype(np.int32), dtype=wp.int32, device=self.device)
-        self.faceNormals = wp.zeros(self.numFaces, dtype = wp.vec3, device=self.device)
-        self.meshCenters = wp.array(np.array(mesh_centers).astype(np.float32), dtype=wp.vec3, device=self.device)
-
-        # Create BVH using positions array from the specified device
-        self.BVH = wp.Mesh(points=self.positions, indices=wp.array(all_faces.flatten().astype(np.int32), dtype=wp.int32, device=self.device))
+        self.faceIds = wp.array(all_faces.astype(np.int32), dtype=wp.int32, device = "cuda")
+        self.faceNormals = wp.zeros(self.numFaces, dtype = wp.vec3, device = "cuda")
+        self.meshCenters = wp.array(np.array(mesh_centers).astype(np.float32), dtype=wp.vec3, device="cuda")
+        
+        # Create BVH using all vertices and faces
+        self.BVH = wp.Mesh(points=self.positions, indices=wp.array(all_faces.flatten().astype(np.int32), dtype=wp.int32))
         
         # Compute tet rest states
-        wp.launch(kernel=compute_tet_states, dim=self.numTets, device=self.device,
+        wp.launch(kernel=compute_tet_states, dim=self.numTets, device = "cuda",
             inputs=[self.positions, self.tetIds, self.density, self.invRestVolumes, self.invRestPoses, self.invMasses])
         # Convert masses to inverse masses
-        wp.launch(kernel=invert_array,dim=self.numVertices, device=self.device,
+        wp.launch(kernel=invert_array,dim=self.numVertices, device = "cuda",
             inputs=[self.invMasses])
-        wp.launch(kernel=fix_vertices,dim=self.numVertices, device=self.device,
+        wp.launch(kernel=fix_vertices,dim=self.numVertices, device = "cuda",
             inputs=[self.positions, self.invMasses])
         
         masses = self.invMasses.numpy()
         zero_indices = np.flatnonzero(masses == 0)
-        self.fixedVertices = wp.array(zero_indices.astype(np.int32), dtype=wp.int32, device=self.device)
-        #self.moving_vertices = wp.empty(len(self.fixedVertices)//2, dtype=wp.int32, device=self.device)
-        #wp.copy(dest=self.moving_vertices, src=self.fixedVertices, count=len(self.fixedVertices)//2)
+        self.fixedVertices = wp.array(zero_indices.astype(np.int32), dtype = wp.int32, device = "cuda")
+        self.moving_vertices = wp.empty(len(self.fixedVertices)//2, dtype=wp.int32, device="cuda")
+        wp.copy(dest=self.moving_vertices, src=self.fixedVertices, count=len(self.fixedVertices)//2)
         
         # Initialize collision detection buffers
         self.init_collision_buffers()
         
+    def update_bvh(self):
+        # Update BVH mesh vertices
+        wp.copy(self.BVH.points, self.positions)
+        # Refit BVH after updating vertices
+        self.BVH.refit()
+
+    def init_collision_buffers(self):
+        """Initialize arrays for storing collision information"""
+        # Pre-allocate collision arrays with fixed buffer size per vertex/triangle
+        vertex_collision_buffer_size = self.numVertices * self.collision_buffer_size
+        triangle_collision_buffer_size = self.numFaces * self.collision_buffer_size
+        
+        # Initialize vertex collision arrays
+        self.vertex_colliding_triangles = wp.zeros(vertex_collision_buffer_size, dtype=wp.int32, device="cuda")
+        self.vertex_collision_counts = wp.zeros(self.numVertices, dtype=wp.int32, device="cuda")
+        self.vertex_collision_distances = wp.zeros(vertex_collision_buffer_size, dtype=wp.float32, device="cuda")
+        
+        # Initialize triangle collision arrays
+        self.triangle_colliding_vertices = wp.zeros(triangle_collision_buffer_size, dtype=wp.int32, device="cuda")
+        self.triangle_collision_counts = wp.zeros(self.numFaces, dtype=wp.int32, device="cuda")
+        self.triangle_collision_distances = wp.zeros(triangle_collision_buffer_size, dtype=wp.float32, device="cuda")
+        
+        # Compute offset arrays
+        self.vertex_collision_offsets = self.compute_collision_offsets(self.numVertices, self.collision_buffer_size)
+        self.triangle_collision_offsets = self.compute_collision_offsets(self.numFaces, self.collision_buffer_size)
+        
+        # Create CollisionInfo struct instance
+        self.collision_info = CollisionInfo()
+        self.collision_info.vertex_colliding_triangles = self.vertex_colliding_triangles
+        self.collision_info.vertex_collision_offsets = self.vertex_collision_offsets
+        self.collision_info.vertex_collision_counts = self.vertex_collision_counts
+        self.collision_info.vertex_collision_distances = self.vertex_collision_distances
+        
+        self.collision_info.triangle_colliding_vertices = self.triangle_colliding_vertices
+        self.collision_info.triangle_collision_offsets = self.triangle_collision_offsets
+        self.collision_info.triangle_collision_counts = self.triangle_collision_counts
+        self.collision_info.triangle_collision_distances = self.triangle_collision_distances
+
+    def compute_collision_offsets(self, count: int, buffer_size: int) -> wp.array:
+        """Compute offset array for collision buffer access"""
+        offsets = np.arange(count + 1) * buffer_size
+        return wp.array(offsets.astype(np.int32), dtype=wp.int32, device="cuda")
+    
     def step(self):
-        if (self.frameCount <= 180.0):
+        """
+        if (self.frameCount <= 90.0):
             wp.launch(kernel=rotate_fixed_vertices, dim=len(self.fixedVertices), device = "cuda",
-                            inputs = [self.positions, self.fixedVertices, np.radians(0.5)])
-            self.frameCount += 0.5
+                            inputs = [self.positions, self.fixedVertices, np.radians(0.1)])
+            self.frameCount += 0.1
         """
         movement = wp.vec3(0.0, 0.0, 0.0)
-        if (self.frameCount < 200.0):
-            movement = wp.vec3(-0.001, 0.0, 0.0)
-        wp.launch(kernel=move_cylinder, dim=len(self.moving_vertices), device=self.device,
+        if (self.frameCount < 50.0):
+            movement = wp.vec3(-0.0005, 0.0, 0.0)
+        """
+        elif ((self.frameCount % 300) < 150):
+            movement = wp.vec3(0.0, -0.0001, 0.0)
+        else:
+            movement = wp.vec3(0.0, 0.0001, 0.0)
+        """
+        wp.launch(kernel=move_cylinder, dim=len(self.moving_vertices), device = "cuda",
                         inputs = [self.positions, self.moving_vertices, movement])
         self.frameCount += 1
-        """
-        
         # Calculate the normals
-        wp.launch(kernel=calculate_faceNormals, dim=self.numFaces, device=self.device,
+        wp.launch(kernel=calculate_faceNormals, dim=self.numFaces, device="cuda",
                     inputs=[self.positions, self.faceIds, self.faceOffsets, self.meshCenters,
                             self.faceNormals, self.vertexNormals, self.vertexNormalCounts])
-        wp.launch(kernel=calculate_vertex_normals, dim=self.numVertices, device=self.device,
+        wp.launch(kernel=calculate_vertex_normals, dim=self.numVertices, device="cuda",
                     inputs=[self.vertexNormals, self.vertexNormalCounts])
         
         self.update_bvh()
@@ -193,45 +236,34 @@ class Simulator:
         
         dt = DT / SUB_STEPS
         for _ in range(SUB_STEPS):
-            wp.launch(kernel=integrate, dim=self.numVertices, device=self.device,
+            wp.launch(kernel=integrate, dim=self.numVertices, device = "cuda",
                         inputs = [self.positions, self.prev_positions, self.invMasses, self.velocities, GRAVITY, dt])
             
+            numTets = int(self.numTets)
+            tetsOffset = 0
+            for _ in range(1):
+                self.iterative_jacobi_solve(device="cuda", kernel=solve_material_constraints, dim=numTets, numIterations=5,
+                                inputs=[self.positions, self.invMasses, self.tetIds, self.invRestPoses,
+                                        self.invRestVolumes, self.volCompliance, self.devCompliance, 
+                                        dt, tetsOffset, self.corrections])
+                tetsOffset = tetsOffset + numTets
             
-            
-            self.iterative_jacobi_solve(kernel=solve_material_constraints, dim=self.numTets, numIterations=5,
-                            inputs=[self.positions, self.invMasses, self.tetIds, self.invRestPoses,
-                                    self.invRestVolumes, self.volCompliance, self.devCompliance, 
-                                    dt, 0, self.corrections])
+            numTets = self.numTets - tetsOffset
+            self.iterative_jacobi_solve(device="cuda", kernel=solve_material_constraints, dim=numTets, numIterations=5,
+                                    inputs=[self.positions, self.invMasses, self.tetIds, self.invRestPoses,
+                                            self.invRestVolumes, self.volCompliance, self.devCompliance, 
+                                            dt, tetsOffset, self.corrections])
             
             """
-            self.iterative_jacobi_solve(kernel=solve_collision_constraints, dim=self.numVertices, numIterations=5, jacobiScale=0.2,
+            self.iterative_jacobi_solve(device="cuda", kernel=solve_collision_constraints, dim=self.numVertices, numIterations=4, jacobiScale=0.25,
                                     inputs=[self.positions, self.invMasses, self.faceIds,
                                            self.vertex_colliding_triangles, self.vertex_collision_offsets,
                                            self.vertex_collision_counts, self.vertex_collision_distances,
                                            self.collisionCompliance/(dt**2), self.corrections])
             """
-            
-            collision_counts = self.vertex_collision_counts.numpy()
-            colliding_vertices = np.nonzero(collision_counts)[0]
-            
-            # Process only vertices that have collisions
-            for vertex_idx in colliding_vertices:
-                wp.launch(
-                    kernel=solve_collision_constraints_sequential_direct,
-                    dim=1,
-                    device=self.device,
-                    inputs=[
-                        self.positions, self.invMasses, self.faceIds,
-                        self.vertex_colliding_triangles, self.vertex_collision_offsets,
-                        self.vertex_collision_counts, self.meshCenters, self.faceOffsets,
-                        self.collisionCompliance/(dt**2), vertex_idx
-                    ]
-                )
-            
-            
-            wp.launch(kernel=update_velocity, dim=self.numVertices, device=self.device,
+            wp.launch(kernel=update_velocity, dim=self.numVertices, device = "cuda",
                         inputs = [self.positions, self.prev_positions, self.velocities, dt])
-            
+        
         # Transfer data between CPU and GPU
         meshCenters = []
         vertices = self.positions.numpy()
@@ -244,115 +276,61 @@ class Simulator:
             mesh.faceNormals = fNormals[fOff[idx] : fOff[idx+1]]
             mesh.vertex_normals = vNormals[vOff[idx] : vOff[idx+1]]
             meshCenters.append(mesh.center)
-        self.meshCenters = wp.array(np.array(meshCenters).astype(np.float32), dtype=wp.vec3, device=self.device)
-    
-    def update_bvh(self):
-        # Update BVH mesh vertices
-        wp.copy(self.BVH.points, self.positions)
-        # Refit BVH after updating vertices
-        self.BVH.refit()
-    
-    def init_collision_buffers(self):
-        """Initialize arrays for storing collision information"""
-        self.vertex_status = wp.zeros(self.numVertices, dtype=wp.int32, device=self.device)
+        self.meshCenters = wp.array(np.array(meshCenters).astype(np.float32), dtype=wp.vec3, device="cuda")
         
-        # Pre-allocate collision arrays with fixed buffer size per vertex/triangle
-        vertex_collision_buffer_size = self.numVertices * self.collision_buffer_size
-        triangle_collision_buffer_size = self.numFaces * self.collision_buffer_size
-        
-        # Initialize vertex collision arrays
-        self.vertex_colliding_triangles = wp.zeros(vertex_collision_buffer_size, dtype=wp.int32, device=self.device)
-        self.vertex_collision_counts = wp.zeros(self.numVertices, dtype=wp.int32, device=self.device)
-        self.vertex_collision_distances = wp.zeros(vertex_collision_buffer_size, dtype=wp.float32, device=self.device)
-        
-        # Initialize triangle collision arrays
-        self.triangle_colliding_vertices = wp.zeros(triangle_collision_buffer_size, dtype=wp.int32, device=self.device)
-        self.triangle_collision_counts = wp.zeros(self.numFaces, dtype=wp.int32, device=self.device)
-        self.triangle_collision_distances = wp.zeros(triangle_collision_buffer_size, dtype=wp.float32, device=self.device)
-        
-        # Compute offset arrays
-        self.vertex_collision_offsets = self.compute_collision_offsets(self.numVertices, self.collision_buffer_size)
-        self.triangle_collision_offsets = self.compute_collision_offsets(self.numFaces, self.collision_buffer_size)
-        
-        # Create CollisionInfo struct instance
-        self.collision_info = CollisionInfo()
-        self.collision_info.vertex_colliding_triangles = self.vertex_colliding_triangles
-        self.collision_info.vertex_collision_offsets = self.vertex_collision_offsets
-        self.collision_info.vertex_collision_counts = self.vertex_collision_counts
-        self.collision_info.vertex_collision_distances = self.vertex_collision_distances
-        
-        self.collision_info.triangle_colliding_vertices = self.triangle_colliding_vertices
-        self.collision_info.triangle_collision_offsets = self.triangle_collision_offsets
-        self.collision_info.triangle_collision_counts = self.triangle_collision_counts
-        self.collision_info.triangle_collision_distances = self.triangle_collision_distances
-
-    def compute_collision_offsets(self, count: int, buffer_size: int) -> wp.array:
-        """Compute offset array for collision buffer access"""
-        offsets = np.arange(count + 1) * buffer_size
-        return wp.array(offsets.astype(np.int32), dtype=wp.int32, device=self.device)
-    
-    def iterative_jacobi_solve(self, kernel, inputs, dim, numIterations=5, jacobiScale=JACOBISCALE):
+    def iterative_jacobi_solve(self, device, kernel, inputs, dim, numIterations=5, jacobiScale = JACOBISCALE):
         for _ in range(numIterations):
+            # Zero out corrections from previous iteration
             inputs[-1].zero_()
-            wp.launch(
-                kernel=kernel,
-                dim=dim,
-                inputs=inputs,
-                device=self.device
-            )
-            wp.launch(
-                kernel=add_corrections,
-                dim=inputs[0].shape[0],
+            wp.launch(kernel=kernel, dim=dim, inputs=inputs, device=device)
+            wp.launch(kernel=add_corrections,dim=inputs[0].shape[0],
                 inputs=[inputs[0], inputs[-1], jacobiScale],
-                device=self.device
-            )
-          
+                device=device)
+            
     def detect_collisions(self):
-            # Initialize collision data
-            wp.launch(
-                kernel=init_collision_data_kernel,
-                dim=self.numFaces,
-                inputs=[
-                    self.collisionThreshold,
-                    self.triangle_collision_counts,
-                    self.triangle_collision_distances
-                ],
-                device=self.device
-            )
-            
-            # Clear vertex collision counts
-            wp.launch(
-                kernel=clear_collision_counts,
-                dim=self.numVertices,
-                inputs=[self.vertex_collision_counts],
-                device=self.device
-            )
-            
-            # Detect vertex-triangle collisions
-            wp.launch(
-                kernel=detect_vertex_triangle_collisions,
-                dim=self.numVertices,
-                inputs=[
-                    self.positions,
-                    self.velocities,
-                    self.BVH.id,
-                    self.faceIds,
-                    self.faceOffsets,
-                    self.vertexOffsets,
-                    self.collisionThreshold,
-                    self.faceNormals,
-                    self.vertex_colliding_triangles,
-                    self.vertex_collision_offsets,
-                    self.vertex_collision_counts,
-                    self.vertex_collision_distances,
-                    self.triangle_colliding_vertices,
-                    self.triangle_collision_offsets,
-                    self.triangle_collision_counts,
-                    self.triangle_collision_distances
-                ],
-                device=self.device
-            )
-    
+        # Initialize collision data
+        wp.launch(
+            kernel=init_collision_data_kernel,
+            dim=self.numFaces,
+            inputs=[
+                self.collisionThreshold,
+                self.triangle_collision_counts,
+                self.triangle_collision_distances
+            ],
+            device="cuda"
+        )
+        
+        # Clear vertex collision counts
+        wp.launch(
+            kernel=clear_collision_counts,
+            dim=self.numVertices,
+            inputs=[self.vertex_collision_counts],
+            device="cuda"
+        )
+        
+        # Detect vertex-triangle collisions
+        wp.launch(
+            kernel=detect_vertex_triangle_collisions,
+            dim=self.numVertices,
+            inputs=[
+                self.positions,
+                self.velocities,
+                self.BVH.id,
+                self.faceIds,
+                self.collisionThreshold,  # This is now the base threshold
+                DT,                       # Pass timestep
+                self.vertex_colliding_triangles,
+                self.vertex_collision_offsets,
+                self.vertex_collision_counts,
+                self.vertex_collision_distances,
+                self.triangle_colliding_vertices,
+                self.triangle_collision_offsets,
+                self.triangle_collision_counts,
+                self.triangle_collision_distances
+            ],
+            device="cuda"
+        )
+
 @wp.kernel
 def invert_array(invMasses: wp.array(dtype=float)):
     mNr = wp.tid()
@@ -682,10 +660,8 @@ def detect_vertex_triangle_collisions(
     velocities: wp.array(dtype=wp.vec3),
     mesh_id: wp.uint64,
     face_ids: wp.array2d(dtype=wp.int32),
-    face_offsets: wp.array(dtype=wp.int32),   # Added face offsets
-    vertex_offsets: wp.array(dtype=wp.int32),  # Added vertex offsets
     threshold: float,
-    faceNormals: wp.array(dtype = wp.vec3),
+    dt: float,
     vertex_colliding_triangles: wp.array(dtype=wp.int32),
     vertex_collision_offsets: wp.array(dtype=wp.int32),
     vertex_collision_counts: wp.array(dtype=wp.int32),
@@ -695,88 +671,107 @@ def detect_vertex_triangle_collisions(
     triangle_collision_counts: wp.array(dtype=wp.int32),
     triangle_collision_distances: wp.array(dtype=wp.float32)
 ):
+    """Detect collisions between vertices and triangles with velocity-expanded thresholds"""
     vNr = wp.tid()
-    vertex_mesh_id = get_mesh_id(vNr, vertex_offsets)
     
     vertex = positions[vNr]
+    predicted_position = vertex + velocities[vNr] * dt
     
     # Calculate AABB for the vertex trajectory
-    lower = wp.vec3(vertex[0] - threshold, vertex[1] - threshold, vertex[2] - threshold)
-    upper = wp.vec3(vertex[0] + threshold, vertex[1] + threshold, vertex[2] + threshold)
+    lower = wp.vec3(
+        wp.min(vertex[0], predicted_position[0]),
+        wp.min(vertex[1], predicted_position[1]),
+        wp.min(vertex[2], predicted_position[2])
+    )
+    upper = wp.vec3(
+        wp.max(vertex[0], predicted_position[0]),
+        wp.max(vertex[1], predicted_position[1]),
+        wp.max(vertex[2], predicted_position[2])
+    )
     
+    # Query BVH for potential collisions
     query = wp.mesh_query_aabb(mesh_id, lower, upper)
+    
+    # Track collisions for this vertex
     vertex_num_collisions = wp.int32(0)
+    min_dist_to_tris = threshold
+    
+    # Check each potential triangle collision
     tri_index = wp.int32(0)
     while wp.mesh_query_aabb_next(query, tri_index):
-        # Get triangle's mesh ID
-        triangle_mesh_id = get_mesh_id(tri_index, face_offsets)
-        
-        # Skip if same mesh (self-collision)
-        if vertex_mesh_id == triangle_mesh_id:
-            continue
-            
         # Get triangle vertices
         t1 = face_ids[tri_index, 0]
         t2 = face_ids[tri_index, 1]
         t3 = face_ids[tri_index, 2]
-        t1_pos = positions[t1]
-        t2_pos = positions[t2]
-        t3_pos = positions[t3]
         
-        closest_p, bary, feature_type = triangle_closest_point(t1_pos, t2_pos, t3_pos, vertex)
-        
-        if (feature_type != TRI_CONTACT_FEATURE_FACE_INTERIOR):
+        # Skip if vertex belongs to this triangle
+        if vNr == t1 or vNr == t2 or vNr == t3:
             continue
         
-        to_vertex = vertex - closest_p
-        normal = faceNormals[tri_index]
-        signed_dist = wp.dot(to_vertex, normal)
-        vel = velocities[vNr]
+        # Get triangle vertex positions
+        v0 = positions[t1]
+        v1 = positions[t2]
+        v2 = positions[t3]
         
-        if signed_dist < 0.0 and wp.dot(vel, normal) < 0:
-            vertex_buffer_offset = vertex_collision_offsets[vNr]
-            vertex_buffer_size = vertex_collision_offsets[vNr + 1] - vertex_buffer_offset
-
-            # record v-f collision to vertex
-            if vertex_num_collisions < vertex_buffer_size:
-                vertex_colliding_triangles[vertex_buffer_offset + vertex_num_collisions] = tri_index
-
-            vertex_num_collisions = vertex_num_collisions + 1
-
-            wp.atomic_min(triangle_collision_distances, tri_index, signed_dist)
-            tri_buffer_offset = triangle_collision_offsets[vNr]
-            tri_buffer_size = triangle_collision_offsets[vNr + 1] - tri_buffer_offset
-            tri_num_collisions = wp.atomic_add(triangle_collision_counts, tri_index, 1)
-
-            if tri_num_collisions < tri_buffer_size:
-                tri_buffer_offset = triangle_collision_offsets[tri_index]
-                # record v-f collision to triangle
-                triangle_colliding_vertices[tri_buffer_offset + tri_num_collisions] = vNr
-
+        # Compute triangle normal
+        edge1 = v1 - v0
+        edge2 = v2 - v0
+        tri_normal = wp.normalize(wp.cross(edge1, edge2))
+        
+        # Compute signed distances
+        signed_distance = wp.dot(vertex - v0, tri_normal)
+        signed_predicted_distance = wp.dot(predicted_position - v0, tri_normal)
+        
+        if (signed_distance > 0.0 or abs(signed_distance) >= threshold) and \
+           (signed_predicted_distance > 0.0 or abs(signed_predicted_distance) >= threshold):
+            continue
+            
+        # Project point onto triangle plane
+        projected_point = vertex
+        if signed_distance < 0.0 and abs(signed_distance) < threshold:
+            projected_point = vertex - tri_normal * signed_distance
+        elif signed_predicted_distance < 0.0 and abs(signed_predicted_distance) < threshold:
+            projected_point = predicted_position - tri_normal * signed_predicted_distance
+            
+        # Point in triangle test
+        v0_to_v2 = v2 - v0
+        v0_to_v1 = v1 - v0
+        v0_to_p = projected_point - v0
+        
+        dot00 = wp.dot(v0_to_v2, v0_to_v2)
+        dot01 = wp.dot(v0_to_v2, v0_to_v1)
+        dot02 = wp.dot(v0_to_v2, v0_to_p)
+        dot11 = wp.dot(v0_to_v1, v0_to_v1)
+        dot12 = wp.dot(v0_to_v1, v0_to_p)
+        
+        denom = dot00 * dot11 - dot01 * dot01
+        if abs(denom) > 0.0:
+            u = (dot11 * dot02 - dot01 * dot12) / denom
+            v = (dot00 * dot12 - dot01 * dot02) / denom
+            if u >= 0.0 and v >= 0.0 and u + v <= 1.0:
+                # Store vertex->triangle collision if buffer space available
+                vertex_buffer_offset = vertex_collision_offsets[vNr]
+                vertex_buffer_size = vertex_collision_offsets[vNr + 1] - vertex_buffer_offset
+                
+                min_dist_to_tris = wp.min(min_dist_to_tris, signed_distance)
+                if vertex_num_collisions < vertex_buffer_size:
+                    collision_idx = vertex_buffer_offset + vertex_num_collisions
+                    vertex_colliding_triangles[collision_idx] = tri_index
+                    vertex_collision_distances[collision_idx] = signed_distance
+                
+                vertex_num_collisions = vertex_num_collisions + 1
+                
+                # Store triangle->vertex collision
+                wp.atomic_min(triangle_collision_distances, tri_index, signed_distance)
+                tri_buffer_size = wp.int32(32)  # Fixed buffer size for now
+                tri_num_collisions = wp.atomic_add(triangle_collision_counts, tri_index, 1)
+                
+                if tri_num_collisions < tri_buffer_size:
+                    tri_buffer_offset = triangle_collision_offsets[tri_index]
+                    triangle_colliding_vertices[tri_buffer_offset + tri_num_collisions] = vNr
+    
     vertex_collision_counts[vNr] = vertex_num_collisions
     
-@wp.func
-def get_mesh_id(index: int, offsets: wp.array(dtype=wp.int32)) -> int:
-    """
-    Binary search through offsets to find mesh ID
-    index: vertex or face index to look up
-    offsets: array of offsets marking start of each mesh's data
-    returns: mesh ID (index into offsets array - 1)
-    """
-    left = int(0)
-    right = int(offsets.shape[0] - 1)
-    
-    while left < right:
-        mid = int((left + right) // 2)
-        if offsets[mid] <= index:
-            if offsets[mid + 1] > index:
-                return mid
-            left = mid + 1
-        else:
-            right = mid
-            
-    return left - 1
-
 @wp.kernel
 def solve_collision_constraints(
     positions: wp.array(dtype=wp.vec3),
@@ -860,93 +855,3 @@ def solve_collision_constraints(
         wp.atomic_add(corrections, t1_idx, t1_w * dlambda * grad_t1)
         wp.atomic_add(corrections, t2_idx, t2_w * dlambda * grad_t2)
         wp.atomic_add(corrections, t3_idx, t3_w * dlambda * grad_t3)
-
-@wp.kernel
-def solve_collision_constraints_sequential_direct(
-    positions: wp.array(dtype=wp.vec3),
-    inv_masses: wp.array(dtype=wp.float32),
-    face_ids: wp.array2d(dtype=wp.int32),
-    vertex_colliding_triangles: wp.array(dtype=wp.int32),
-    vertex_collision_offsets: wp.array(dtype=wp.int32),
-    vertex_collision_counts: wp.array(dtype=wp.int32),
-    meshCenters: wp.array(dtype=wp.vec3),
-    face_offsets: wp.array(dtype=wp.int32),
-    alpha: float,
-    index: int  # Added index parameter for sequential execution
-):
-    vertex_idx = index
-    
-    # Get collision count for this vertex
-    num_collisions = vertex_collision_counts[vertex_idx]
-    if num_collisions == 0:
-        return
-        
-    vertex_w = inv_masses[vertex_idx]
-    
-    # Process each collision
-    offset = vertex_collision_offsets[vertex_idx]
-    for i in range(num_collisions):
-        tri_idx = vertex_colliding_triangles[offset + i]
-        mesh_id = get_mesh_id(tri_idx, face_offsets)
-        
-        # Get triangle vertices
-        t1_idx = face_ids[tri_idx, 0]
-        t2_idx = face_ids[tri_idx, 1]
-        t3_idx = face_ids[tri_idx, 2]
-            
-        # Get current positions
-        vertex_pos = positions[vertex_idx]
-        t1_pos = positions[t1_idx]
-        t2_pos = positions[t2_idx]
-        t3_pos = positions[t3_idx]
-        
-        edge1 = t2_pos - t1_pos
-        edge2 = t3_pos - t1_pos
-        normal = wp.normalize(wp.cross(edge1, edge2))
-        
-        """
-        length = wp.length(normal)
-        if length > 0:
-            normal = normal / length
-            
-        face_center = (t1_pos + t2_pos + t3_pos) / 3.0
-        if wp.dot(normal, face_center - meshCenters[mesh_id]) < 0:
-            normal = -normal
-        """
-        
-        # Compute closest point
-        closest_p, bary, feature_type = triangle_closest_point(t1_pos, t2_pos, t3_pos, vertex_pos)
-        
-        # Compute signed distance
-        to_vertex = vertex_pos - closest_p
-        signed_dist = wp.dot(to_vertex, normal)
-        
-        # Only process if penetrating
-        if signed_dist >= 0.0:
-            continue
-            
-        # Set up gradients
-        grad_v = normal
-        grad_t1 = -bary[0] * normal
-        grad_t2 = -bary[1] * normal
-        grad_t3 = -bary[2] * normal
-        
-        # Get inverse masses
-        t1_w = inv_masses[t1_idx]
-        t2_w = inv_masses[t2_idx]
-        t3_w = inv_masses[t3_idx]
-        
-        # Compute denominator
-        w_sum = vertex_w * wp.dot(grad_v, grad_v) + \
-                t1_w * wp.dot(grad_t1, grad_t1) + \
-                t2_w * wp.dot(grad_t2, grad_t2) + \
-                t3_w * wp.dot(grad_t3, grad_t3)
-                
-        # Compute lambda
-        dlambda = (-signed_dist) / (w_sum + alpha)
-        
-        # Directly update positions
-        positions[vertex_idx] += vertex_w * dlambda * grad_v
-        positions[t1_idx] += t1_w * dlambda * grad_t1
-        positions[t2_idx] += t2_w * dlambda * grad_t2
-        positions[t3_idx] += t3_w * dlambda * grad_t3
