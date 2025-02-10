@@ -13,6 +13,10 @@ POSSION_RATIO = 0.4
 DEVIATORIC_COMPLIANCE = 2e-4
 COLLISION_COMPLIANCE = 0.0
 COLLISION_THRESHOLD = 0.01
+DAMPING_CONSTANT = 0.1
+QUERY_RADIUS = 0.01
+
+ENABLE_DAMPING = False
 
 mu = 1/DEVIATORIC_COMPLIANCE
 YOUNG_MODULUS = 2 * mu * (1 + POSSION_RATIO)
@@ -53,7 +57,8 @@ class Simulator:
                  devCompliance=DEVIATORIC_COMPLIANCE, 
                  volCompliance=VOLUME_COMPLIANCE, 
                  collisionCompliance=COLLISION_COMPLIANCE, 
-                 collisionThreshold=COLLISION_THRESHOLD):
+                 collisionThreshold=COLLISION_THRESHOLD,
+                 queryRadius=QUERY_RADIUS):
         self.frameCount = 0.0
         self.meshes = meshes
         self.density = density
@@ -64,6 +69,7 @@ class Simulator:
         
         # Collision detection parameters
         self.collision_buffer_size = 8
+        self.queryRadius = queryRadius
         self.collisionThreshold = collisionThreshold
         
         if self.meshes is not None:
@@ -118,9 +124,9 @@ class Simulator:
         self.faceIds = wp.array(all_faces.astype(np.int32), dtype=wp.int32, device=self.device)
         self.faceNormals = wp.zeros(self.numFaces, dtype = wp.vec3, device=self.device)
         self.meshCenters = wp.array(np.array(mesh_centers).astype(np.float32), dtype=wp.vec3, device=self.device)
-
-        # Create BVH using positions array from the specified device
-        self.BVH = wp.Mesh(points=self.positions, indices=wp.array(all_faces.flatten().astype(np.int32), dtype=wp.int32, device=self.device))
+        
+        # Create BVH
+        self.Mesh_BVH = wp.Mesh(points=self.positions, indices=wp.array(all_faces.flatten().astype(np.int32), dtype=wp.int32))
         
         # Compute tet rest states
         wp.launch(kernel=compute_tet_states, dim=self.numTets, device=self.device,
@@ -141,7 +147,7 @@ class Simulator:
         self.init_collision_buffers()
         
     def step(self):
-        if (self.frameCount <= 180.0):
+        if (self.frameCount <= 120.0):
             wp.launch(kernel=rotate_fixed_vertices, dim=len(self.fixedVertices), device = "cuda",
                             inputs = [self.positions, self.fixedVertices, np.radians(0.5)])
             self.frameCount += 0.5
@@ -179,8 +185,8 @@ class Simulator:
             if vertex_counts[i] > 0:
                 colliding_vertices.append(i)
                 offset = vertex_collision_offsets[i]
-                for j in range(vertex_counts[i]):
-                    colliding_faces.append(vertex_colliding_triangles[offset + j])
+                #for j in range(vertex_counts[i]):
+                    #colliding_faces.append(vertex_colliding_triangles[offset + j])
         
         # Update collision visualization for each mesh
         for idx, mesh in enumerate(self.meshes):
@@ -221,10 +227,10 @@ class Simulator:
                     dim=1,
                     device=self.device,
                     inputs=[
-                        self.positions, self.invMasses, self.faceIds,
+                        self.positions, self.prev_positions, self.invMasses, self.faceIds,
                         self.vertex_colliding_triangles, self.vertex_collision_offsets,
                         self.vertex_collision_counts, self.meshCenters, self.faceOffsets,
-                        self.collisionCompliance/(dt**2), vertex_idx
+                        dt, vertex_idx
                     ]
                 )
             
@@ -245,16 +251,17 @@ class Simulator:
             mesh.vertex_normals = vNormals[vOff[idx] : vOff[idx+1]]
             meshCenters.append(mesh.center)
         self.meshCenters = wp.array(np.array(meshCenters).astype(np.float32), dtype=wp.vec3, device=self.device)
-    
+
     def update_bvh(self):
-        # Update BVH mesh vertices
-        wp.copy(self.BVH.points, self.positions)
+        wp.copy(self.Mesh_BVH.points, self.positions)
         # Refit BVH after updating vertices
-        self.BVH.refit()
+        self.Mesh_BVH.refit()
     
     def init_collision_buffers(self):
         """Initialize arrays for storing collision information"""
-        self.vertex_status = wp.zeros(self.numVertices, dtype=wp.int32, device=self.device)
+        # Initialize inside vertices array
+        self.inside_vertices = wp.zeros(self.numVertices, dtype=wp.int32, device=self.device)
+        self.num_inside_vertices = wp.zeros(1, dtype=wp.int32, device=self.device)
         
         # Pre-allocate collision arrays with fixed buffer size per vertex/triangle
         vertex_collision_buffer_size = self.numVertices * self.collision_buffer_size
@@ -306,7 +313,8 @@ class Simulator:
                 inputs=[inputs[0], inputs[-1], jacobiScale],
                 device=self.device
             )
-          
+
+    #"""      
     def detect_collisions(self):
             # Initialize collision data
             wp.launch(
@@ -335,11 +343,11 @@ class Simulator:
                 inputs=[
                     self.positions,
                     self.velocities,
-                    self.BVH.id,
+                    self.Mesh_BVH.id,
                     self.faceIds,
                     self.faceOffsets,
                     self.vertexOffsets,
-                    self.collisionThreshold,
+                    self.queryRadius,
                     self.faceNormals,
                     self.vertex_colliding_triangles,
                     self.vertex_collision_offsets,
@@ -352,7 +360,60 @@ class Simulator:
                 ],
                 device=self.device
             )
-    
+    """
+
+    def detect_collisions(self):
+        # Clear collision counts and inside counter
+        wp.launch(
+            kernel=clear_collision_counts,
+            dim=self.numVertices,
+            inputs=[self.vertex_collision_counts],
+            device=self.device
+        )
+        self.num_inside_vertices.zero_()
+        
+        # Detect inside vertices and compact them
+        wp.launch(
+            kernel=detect_and_compact_inside_vertices,
+            dim=self.numVertices,
+            inputs=[
+                self.positions,
+                self.velocities,
+                self.faceIds,
+                self.vertexOffsets,
+                self.faceOffsets,
+                self.inside_vertices,
+                self.num_inside_vertices,
+                self.BVH.id
+            ],
+            device=self.device
+        )
+        
+        # Get number of inside vertices
+        num_inside = self.num_inside_vertices.numpy()[0]
+        
+        if num_inside > 0:
+            # Find collision triangles for inside vertices only
+            wp.launch(
+                kernel=find_collision_triangles,
+                dim=int(num_inside),
+                inputs=[
+                    self.positions,
+                    self.velocities,
+                    self.faceIds,
+                    self.faceNormals,
+                    self.inside_vertices,
+                    self.vertexOffsets,
+                    self.faceOffsets,
+                    self.vertex_colliding_triangles,
+                    self.vertex_collision_offsets,
+                    self.vertex_collision_counts,
+                    self.queryRadius,
+                    self.Mesh_BVH.id
+                ],
+                device=self.device
+            )
+    """
 @wp.kernel
 def invert_array(invMasses: wp.array(dtype=float)):
     mNr = wp.tid()
@@ -684,7 +745,7 @@ def detect_vertex_triangle_collisions(
     face_ids: wp.array2d(dtype=wp.int32),
     face_offsets: wp.array(dtype=wp.int32),   # Added face offsets
     vertex_offsets: wp.array(dtype=wp.int32),  # Added vertex offsets
-    threshold: float,
+    queryRadius: float,
     faceNormals: wp.array(dtype = wp.vec3),
     vertex_colliding_triangles: wp.array(dtype=wp.int32),
     vertex_collision_offsets: wp.array(dtype=wp.int32),
@@ -701,8 +762,8 @@ def detect_vertex_triangle_collisions(
     vertex = positions[vNr]
     
     # Calculate AABB for the vertex trajectory
-    lower = wp.vec3(vertex[0] - threshold, vertex[1] - threshold, vertex[2] - threshold)
-    upper = wp.vec3(vertex[0] + threshold, vertex[1] + threshold, vertex[2] + threshold)
+    lower = wp.vec3(vertex[0] - queryRadius, vertex[1] - queryRadius, vertex[2] - queryRadius)
+    upper = wp.vec3(vertex[0] + queryRadius, vertex[1] + queryRadius, vertex[2] + queryRadius)
     
     query = wp.mesh_query_aabb(mesh_id, lower, upper)
     vertex_num_collisions = wp.int32(0)
@@ -742,7 +803,7 @@ def detect_vertex_triangle_collisions(
                 vertex_colliding_triangles[vertex_buffer_offset + vertex_num_collisions] = tri_index
 
             vertex_num_collisions = vertex_num_collisions + 1
-
+            """
             wp.atomic_min(triangle_collision_distances, tri_index, signed_dist)
             tri_buffer_offset = triangle_collision_offsets[vNr]
             tri_buffer_size = triangle_collision_offsets[vNr + 1] - tri_buffer_offset
@@ -752,7 +813,7 @@ def detect_vertex_triangle_collisions(
                 tri_buffer_offset = triangle_collision_offsets[tri_index]
                 # record v-f collision to triangle
                 triangle_colliding_vertices[tri_buffer_offset + tri_num_collisions] = vNr
-
+                """
     vertex_collision_counts[vNr] = vertex_num_collisions
     
 @wp.func
@@ -864,6 +925,7 @@ def solve_collision_constraints(
 @wp.kernel
 def solve_collision_constraints_sequential_direct(
     positions: wp.array(dtype=wp.vec3),
+    prev_pos: wp.array(dtype=wp.vec3),
     inv_masses: wp.array(dtype=wp.float32),
     face_ids: wp.array2d(dtype=wp.int32),
     vertex_colliding_triangles: wp.array(dtype=wp.int32),
@@ -871,7 +933,7 @@ def solve_collision_constraints_sequential_direct(
     vertex_collision_counts: wp.array(dtype=wp.int32),
     meshCenters: wp.array(dtype=wp.vec3),
     face_offsets: wp.array(dtype=wp.int32),
-    alpha: float,
+    dt: float,
     index: int  # Added index parameter for sequential execution
 ):
     vertex_idx = index
@@ -899,12 +961,15 @@ def solve_collision_constraints_sequential_direct(
         t1_pos = positions[t1_idx]
         t2_pos = positions[t2_idx]
         t3_pos = positions[t3_idx]
+        vertex_pos_prev = prev_pos[vertex_idx]
+        t1_pos_prev = prev_pos[t1_idx]
+        t2_pos_prev = prev_pos[t2_idx]
+        t3_pos_prev = prev_pos[t3_idx]
         
         edge1 = t2_pos - t1_pos
         edge2 = t3_pos - t1_pos
         normal = wp.normalize(wp.cross(edge1, edge2))
         
-        """
         length = wp.length(normal)
         if length > 0:
             normal = normal / length
@@ -912,7 +977,6 @@ def solve_collision_constraints_sequential_direct(
         face_center = (t1_pos + t2_pos + t3_pos) / 3.0
         if wp.dot(normal, face_center - meshCenters[mesh_id]) < 0:
             normal = -normal
-        """
         
         # Compute closest point
         closest_p, bary, feature_type = triangle_closest_point(t1_pos, t2_pos, t3_pos, vertex_pos)
@@ -941,12 +1005,25 @@ def solve_collision_constraints_sequential_direct(
                 t1_w * wp.dot(grad_t1, grad_t1) + \
                 t2_w * wp.dot(grad_t2, grad_t2) + \
                 t3_w * wp.dot(grad_t3, grad_t3)
-                
-        # Compute lambda
-        dlambda = (-signed_dist) / (w_sum + alpha)
         
-        # Directly update positions
-        positions[vertex_idx] += vertex_w * dlambda * grad_v
-        positions[t1_idx] += t1_w * dlambda * grad_t1
-        positions[t2_idx] += t2_w * dlambda * grad_t2
-        positions[t3_idx] += t3_w * dlambda * grad_t3
+        alpha = wp.float32(COLLISION_COMPLIANCE / (dt*dt))
+        if (ENABLE_DAMPING):   
+            # Compute lambda
+            beta = wp.float32(DAMPING_CONSTANT * dt*dt)
+            gamma = wp.float32((alpha * beta)/dt)
+            dlambdav = -(signed_dist + gamma * wp.dot(grad_v, vertex_pos - vertex_pos_prev)) / ((1.0 + gamma) * w_sum + alpha)
+            dlambdat1 = -(signed_dist + gamma * wp.dot(grad_t1, t1_pos - t1_pos_prev)) / ((1.0 + gamma) * w_sum + alpha)
+            dlambdat2 = -(signed_dist + gamma * wp.dot(grad_t2, t2_pos - t2_pos_prev)) / ((1.0 + gamma) * w_sum + alpha)
+            dlambdat3 = -(signed_dist + gamma * wp.dot(grad_t3, t3_pos - t3_pos_prev)) / ((1.0 + gamma) * w_sum + alpha)
+            
+            positions[vertex_idx] += vertex_w * dlambdav * grad_v
+            positions[t1_idx] += t1_w * dlambdat1 * grad_t1
+            positions[t2_idx] += t2_w * dlambdat2 * grad_t2
+            positions[t3_idx] += t3_w * dlambdat3 * grad_t3
+        else:
+            dlambda = (-signed_dist) / (w_sum + alpha)
+        
+            positions[vertex_idx] += vertex_w * dlambda * grad_v
+            positions[t1_idx] += t1_w * dlambda * grad_t1
+            positions[t2_idx] += t2_w * dlambda * grad_t2
+            positions[t3_idx] += t3_w * dlambda * grad_t3

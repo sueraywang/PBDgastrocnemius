@@ -107,17 +107,18 @@ class Mesh:
         
         # Filter faces that belong to this mesh
         mesh_colliding_faces = []
-        for f_idx in colliding_faces:
-            if f_idx >= face_offset and f_idx < face_offset + len(self.faces):
-                mesh_colliding_faces.append(f_idx - face_offset)
-        
+        if len(mesh_colliding_faces) > 0:
+            for f_idx in colliding_faces:
+                if f_idx >= face_offset and f_idx < face_offset + len(self.faces):
+                    mesh_colliding_faces.append(f_idx - face_offset)
+
         # Set active flag for colliding vertices and faces
         if mesh_colliding_vertices:
             self.collision_active[mesh_colliding_vertices] = 1.0
             
-        for face_idx in mesh_colliding_faces:
-            face_vertices = self.faces[face_idx]
-            self.collision_active[face_vertices] = 1.0
+        #for face_idx in mesh_colliding_faces:
+            #face_vertices = self.faces[face_idx]
+            #self.collision_active[face_vertices] = 1.0
         
         # Update GPU buffer
         glBindBuffer(GL_ARRAY_BUFFER, self.collision_active_vbo)

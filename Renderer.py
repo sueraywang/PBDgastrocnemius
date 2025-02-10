@@ -12,8 +12,7 @@ class ShaderPrograms:
 
     out vec3 FragPos;
     out vec3 vertexNormal;
-    flat out vec3 FaceNormal;
-    out float CollisionActive;
+    flat out float CollisionActive;
 
     uniform mat4 view;
     uniform mat4 projection;
@@ -21,7 +20,6 @@ class ShaderPrograms:
     void main()
     {
         FragPos = aPos;
-        FaceNormal = aNormal;
         vertexNormal = aNormal;
         CollisionActive = aCollisionActive;
         gl_Position = projection * view * vec4(FragPos, 1.0);
@@ -34,8 +32,7 @@ class ShaderPrograms:
 
     in vec3 FragPos;
     in vec3 vertexNormal;    
-    flat in vec3 FaceNormal;
-    in float CollisionActive;
+    flat in float CollisionActive;
         
     uniform vec3 lightPos; 
     uniform vec3 viewPos; 
@@ -43,9 +40,21 @@ class ShaderPrograms:
     uniform bool useNormalColor;
     uniform bool visualizeCollision;
     uniform vec3 objectColor;
+    uniform bool isPointPass;
 
     void main()
     {
+        if (isPointPass) {
+            // For point rendering pass, only output red for colliding vertices
+            if (CollisionActive > 0.5) {
+                FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+            } else {
+                discard; // Don't render non-colliding points
+            }
+            return;
+        }
+
+        // Regular rendering for triangles
         float ambientStrength = 0.5;
         vec3 ambient = ambientStrength * lightColor;
         
@@ -54,40 +63,21 @@ class ShaderPrograms:
         float diff = max(dot(norm, lightDir), 0.0);
         vec3 diffuse = diff * lightColor;
         
-        if (visualizeCollision && CollisionActive > 0.5) {
-            // Use red color for collisions
-            vec3 result = (ambient + diffuse) * vec3(1.0, 0.0, 0.0);
-            FragColor = vec4(result, 1.0);
-        } else if (useNormalColor) {
-            vec3 normalColor = (normalize(FaceNormal) + 1.0) * 0.5;
-            float ambientStrength = 0.3;
-            vec3 ambient = ambientStrength * lightColor;
-            
-            vec3 norm = normalize(FaceNormal);
-            vec3 lightDir = normalize(lightPos - FragPos);
-            float diff = max(dot(norm, lightDir), 0.0);
-            vec3 diffuse = diff * lightColor;
-            
-            vec3 result = (ambient + diffuse) * normalColor;
-            FragColor = vec4(result, 1.0);
+        vec3 baseColor;
+        if (useNormalColor) {
+            baseColor = (normalize(vertexNormal) + 1.0) * 0.5;
         } else {
-            float ambientStrength = 0.5;
-            vec3 ambient = ambientStrength * lightColor;
-            
-            vec3 norm = normalize(vertexNormal);
-            vec3 lightDir = normalize(lightPos - FragPos);
-            float diff = max(dot(norm, lightDir), 0.0);
-            vec3 diffuse = diff * lightColor;
-            
-            float specularStrength = 0.1;
-            vec3 viewDir = normalize(viewPos - FragPos);
-            vec3 reflectDir = reflect(-lightDir, norm);  
-            float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32);
-            vec3 specular = specularStrength * spec * lightColor;  
-                
-            vec3 result = (ambient + diffuse + specular) * objectColor;
-            FragColor = vec4(result, 1.0);
+            baseColor = objectColor;
         }
+        
+        float specularStrength = 0.1;
+        vec3 viewDir = normalize(viewPos - FragPos);
+        vec3 reflectDir = reflect(-lightDir, norm);  
+        float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32);
+        vec3 specular = specularStrength * spec * lightColor;
+        
+        vec3 result = (ambient + diffuse + specular) * baseColor;
+        FragColor = vec4(result, 1.0);
     } 
     """
 
@@ -220,6 +210,7 @@ class Renderer:
                                                       ShaderPrograms.AXES_FRAGMENT_SHADER)
         self.use_normal_color_loc = glGetUniformLocation(self.shader, "useNormalColor")
         self.visualize_collisions_loc = glGetUniformLocation(self.shader, "visualizeCollision")
+        self.is_point_pass_loc = glGetUniformLocation(self.shader, "isPointPass")
 
     def _compile_shader_program(self, vertex_source, fragment_source):
         """Compile shader program from vertex and fragment shader sources"""
@@ -403,27 +394,40 @@ class Renderer:
         """Render all meshes in the scene"""
         for mesh in self.meshes:
             glBindVertexArray(mesh.vao)
+            
+            # First pass: Regular triangle rendering
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+            glUniform1i(self.is_point_pass_loc, 0)
+            
             if self.use_normal_coloring:
-                # Normal visualization mode
-                glUniform1i(self.use_normal_color_loc, True)
+                glUniform1i(self.use_normal_color_loc, 1)
                 glDrawElements(GL_TRIANGLES, mesh.num_indices, GL_UNSIGNED_INT, None)
-                # Disable normal coloring for future rendering
-                glUniform1i(self.use_normal_color_loc, False)
-
+                glUniform1i(self.use_normal_color_loc, 0)
             else:
-                # Original rendering mode
                 glUniform3fv(glGetUniformLocation(self.shader, "objectColor"), 1, mesh.color)
                 glDrawElements(GL_TRIANGLES, mesh.num_indices, GL_UNSIGNED_INT, None)
             
-            if self.visualize_collisions:
-                glUniform1i(self.visualize_collisions_loc, True)
-            
+            # Second pass: Edge rendering
             if self.render_edges:    
-                # Draw edges in black
                 glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
                 glUniform3fv(glGetUniformLocation(self.shader, "objectColor"), 1, np.array([0.0, 0.0, 0.0]))
                 glDrawElements(GL_TRIANGLES, mesh.num_indices, GL_UNSIGNED_INT, None)
+            
+            # Third pass: Collision point rendering
+            if self.visualize_collisions:
+                glPointSize(10.0)  # Set point size
+                glPolygonMode(GL_FRONT_AND_BACK, GL_POINT)
+                glEnable(GL_PROGRAM_POINT_SIZE)
+                glUniform1i(self.is_point_pass_loc, 1)
+                
+                # Draw all vertices - shader will discard non-colliding ones
+                glDrawArrays(GL_POINTS, 0, len(mesh.vertices))
+                
+                glDisable(GL_PROGRAM_POINT_SIZE)
+                glUniform1i(self.is_point_pass_loc, 0)
+            
+            # Reset states
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
     def _render_axes(self):
         """Render coordinate axes"""
